@@ -27,6 +27,7 @@ public:
 private:
 
 	void HandleSocketMessage(const FString& Data);
+	void HandleSocketConnected();
 	void RegisterMenus();
 
 

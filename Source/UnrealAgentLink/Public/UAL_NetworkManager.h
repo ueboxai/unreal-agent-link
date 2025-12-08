@@ -6,6 +6,7 @@
 
 // 线程间消息通知
 DECLARE_MULTICAST_DELEGATE_OneParam(FUALOnMessageReceived, const FString&);
+DECLARE_MULTICAST_DELEGATE(FUALOnConnected);
 
 #include "Containers/Ticker.h"
 using FTickerHandleType = FTSTicker::FDelegateHandle;
@@ -31,6 +32,9 @@ public:
 
 	// 接收消息回调（在 Socket 线程触发，外部需切到 GameThread）
 	FUALOnMessageReceived& OnMessageReceived() { return MessageReceivedDelegate; }
+
+	// 连接成功回调（在 Socket 线程触发，外部需切到 GameThread）
+	FUALOnConnected& OnConnected() { return ConnectedDelegate; }
 
 	// 当前是否已连接
 	bool IsConnected() const;
@@ -61,5 +65,6 @@ private:
 	bool bWantsReconnect = false;
 
 	FUALOnMessageReceived MessageReceivedDelegate;
+	FUALOnConnected ConnectedDelegate;
 };
 

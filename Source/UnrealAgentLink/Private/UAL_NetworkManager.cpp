@@ -137,6 +137,7 @@ void FUAL_NetworkManager::HandleOnConnected()
 {
 	UE_LOG(LogUALNetwork, Display, TEXT("Connected to %s"), *TargetUrl);
 	bIsConnecting = false;
+	ConnectedDelegate.Broadcast();
 }
 
 void FUAL_NetworkManager::HandleOnClosed(int32 StatusCode, const FString& Reason, bool bWasClean)

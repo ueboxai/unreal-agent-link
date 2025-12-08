@@ -14,6 +14,9 @@ public:
 	// 必须在 GameThread 调用
 	void ProcessMessage(const FString& JsonPayload);
 
+	// 构建项目信息（GameThread 调用）
+	TSharedPtr<FJsonObject> BuildProjectInfo() const;
+
 private:
 	using FHandlerFunc = TFunction<void(const TSharedPtr<FJsonObject>& /*Payload*/, const FString /*RequestId*/)> ;
 
@@ -22,6 +25,9 @@ private:
 	// 指令实现
 	void Handle_RunPython(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 	void Handle_ExecConsole(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	void Handle_GetProjectInfo(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	void Handle_SpawnActor(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	void Handle_DestroyActor(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 
 	// 响应处理（用于弹出通知）
 	void Handle_Response(const FString& Method, const TSharedPtr<FJsonObject>& Payload);

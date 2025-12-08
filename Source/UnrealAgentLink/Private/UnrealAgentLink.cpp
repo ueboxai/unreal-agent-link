@@ -10,6 +10,8 @@
 #include "UAL_LogInterceptor.h"
 #include "UAL_ContentBrowserExt.h"
 #include "Async/Async.h"
+#include "Serialization/JsonWriter.h"
+#include "Serialization/JsonSerializer.h"
 
 static const FName UnrealAgentLinkTabName("UnrealAgentLink");
 
@@ -46,6 +48,7 @@ void FUnrealAgentLinkModule::StartupModule()
 	// 默认连接到本地 Agent
 	const FString DefaultUrl = TEXT("ws://127.0.0.1:17860");
 	FUAL_NetworkManager::Get().OnMessageReceived().AddRaw(this, &FUnrealAgentLinkModule::HandleSocketMessage);
+	FUAL_NetworkManager::Get().OnConnected().AddRaw(this, &FUnrealAgentLinkModule::HandleSocketConnected);
 	FUAL_NetworkManager::Get().Init(DefaultUrl);
 
 	// 注册内容浏览器菜单扩展
@@ -69,6 +72,7 @@ void FUnrealAgentLinkModule::ShutdownModule()
 	FUnrealAgentLinkCommands::Unregister();
 
 	FUAL_NetworkManager::Get().OnMessageReceived().RemoveAll(this);
+	FUAL_NetworkManager::Get().OnConnected().RemoveAll(this);
 	FUAL_NetworkManager::Get().Shutdown();
 
 	if (GLog && LogInterceptor.IsValid())
@@ -126,6 +130,36 @@ void FUnrealAgentLinkModule::HandleSocketMessage(const FString& Data)
 		{
 			CommandHandler->ProcessMessage(Data);
 		}
+	});
+}
+
+void FUnrealAgentLinkModule::HandleSocketConnected()
+{
+	// 将回调切回 GameThread 构建数据并发送
+	AsyncTask(ENamedThreads::GameThread, [this]()
+	{
+		if (!CommandHandler)
+		{
+			return;
+		}
+
+		const TSharedPtr<FJsonObject> Payload = CommandHandler->BuildProjectInfo();
+		if (!Payload.IsValid())
+		{
+			return;
+		}
+
+		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+		Root->SetStringField(TEXT("ver"), TEXT("1.0"));
+		Root->SetStringField(TEXT("type"), TEXT("evt"));
+		Root->SetStringField(TEXT("method"), TEXT("project.info"));
+		Root->SetObjectField(TEXT("payload"), Payload);
+
+		FString OutJson;
+		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutJson);
+		FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
+
+		FUAL_NetworkManager::Get().SendMessage(OutJson);
 	});
 }
 

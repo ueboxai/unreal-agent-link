@@ -8,6 +8,7 @@
 #include "Runtime/Launch/Resources/Version.h"
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"
+#include "HAL/IConsoleManager.h"
 
 // 兼容 5.0 与 5.1+ 的日志等级字符串获取
 static FString UALVerbosityToString(ELogVerbosity::Type Verbosity)
@@ -23,7 +24,14 @@ static FString UALVerbosityToString(ELogVerbosity::Type Verbosity)
 
 void FUAL_LogInterceptor::Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const class FName& Category)
 {
-	if (!bIsCaptureEnabled)
+	// 控制台变量开关，默认关闭日志转发，需手动开启：ual.ForwardLogs 1
+	static TAutoConsoleVariable<int32> CVarForwardLogs(
+		TEXT("ual.ForwardLogs"),
+		0,
+		TEXT("Forward UE logs to Unreal Agent (0=off, 1=on)"),
+		ECVF_Default);
+
+	if (!bIsCaptureEnabled || CVarForwardLogs.GetValueOnAnyThread() == 0)
 	{
 		return;
 	}
