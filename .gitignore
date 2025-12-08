@@ -1,0 +1,43 @@
+# OS
+Thumbs.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# IDE / editor
+.vs/
+.idea/
+.vscode/
+*.code-workspace
+*.sln*
+*.suo
+*.user
+*.userosscache
+*.opensdf
+*.sdf
+*.cachefile
+*.VC.db
+*.VC.opendb
+*.ipch
+
+# Unreal Engine build outputs
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+
+# Compiled objects and symbols
+*.obj
+*.iobj
+*.ipdb
+*.pdb
+*.log
+*.exp
+*.lib
+
+# macOS Xcode artifacts
+*.xcodeproj
+*.xcworkspace
+*.xcuserdatad
+*.xcuserdata
+
