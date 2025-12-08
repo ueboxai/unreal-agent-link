@@ -9,6 +9,18 @@
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"
 
+// 兼容 5.0 与 5.1+ 的日志等级字符串获取
+static FString UALVerbosityToString(ELogVerbosity::Type Verbosity)
+{
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+	return FLogVerbosity::ToString(Verbosity);
+#else
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	return FOutputDeviceHelper::VerbosityToString(Verbosity);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+#endif
+}
+
 void FUAL_LogInterceptor::Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const class FName& Category)
 {
 	if (!bIsCaptureEnabled)
@@ -16,14 +28,22 @@ void FUAL_LogInterceptor::Serialize(const TCHAR* V, ELogVerbosity::Type Verbosit
 		return;
 	}
 
+	// 避免将网络层自身的日志再次发出去，造成递归与卡死
+	static const FName NetworkLogCategory(TEXT("LogUALNetwork"));
+	if (Category == NetworkLogCategory)
+	{
+		return;
+	}
+
+	// 未连接时直接丢弃日志，避免无网时不停重入 SendMessage
+	if (!FUAL_NetworkManager::Get().IsConnected())
+	{
+		return;
+	}
+
 	const FString Message = FString(V);
 	const FString CategoryName = Category.ToString();
-	FString VerbosityName;
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
-	VerbosityName = FLogVerbosity::ToString(Verbosity);
-#else
-	VerbosityName = FOutputDeviceHelper::VerbosityToString(Verbosity);
-#endif
+	const FString VerbosityName = UALVerbosityToString(Verbosity);
 
 	AsyncTask(ENamedThreads::GameThread, [Message, CategoryName, VerbosityName]()
 	{

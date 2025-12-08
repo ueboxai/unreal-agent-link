@@ -13,11 +13,16 @@ public:
 
 private:
 	TSharedRef<FExtender> OnExtendPathMenu(const TArray<FString>& SelectedPaths);
+	TSharedRef<FExtender> OnExtendAssetMenu(const TArray<FAssetData>& SelectedAssets);
 	void AddMenuEntry(FMenuBuilder& MenuBuilder, TArray<FString> SelectedPaths);
+	void AddAssetMenuEntry(FMenuBuilder& MenuBuilder, TArray<FAssetData> SelectedAssets);
 	void HandleImportToAgent(const TArray<FString>& SelectedPaths);
+	void HandleImportAssets(const TArray<FAssetData>& SelectedAssets);
+	void AddProjectMeta(TSharedPtr<FJsonObject>& Payload) const;
 
 private:
-	FDelegateHandle ExtenderHandle;
+	FDelegateHandle PathExtenderHandle;
+	FDelegateHandle AssetExtenderHandle;
 	bool bRegistered = false;
 };
 

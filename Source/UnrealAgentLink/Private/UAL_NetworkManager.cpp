@@ -38,6 +38,7 @@ void FUAL_NetworkManager::SendMessage(const FString& JsonData)
 	FScopeLock Lock(&SendMutex);
 	if (IsConnected())
 	{
+		UE_LOG(LogUALNetwork, Verbose, TEXT("SendMessage: %s"), *JsonData);
 		Socket->Send(JsonData);
 	}
 	else
