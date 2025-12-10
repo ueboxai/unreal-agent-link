@@ -85,6 +85,33 @@ void FUAL_BlueprintCommands::Handle_CreateBlueprint(const TSharedPtr<FJsonObject
 	{
 		PackageName = PackagePath;
 	}
+	
+	// 2.1 检查蓝图是否已存在（避免覆盖导致崩溃）
+	FString ExistingAssetPath = PackageName + TEXT(".") + BlueprintName;
+	if (UBlueprint* ExistingBlueprint = LoadObject<UBlueprint>(nullptr, *ExistingAssetPath))
+	{
+		// 蓝图已存在，返回冲突错误
+		TSharedPtr<FJsonObject> ConflictResult = MakeShared<FJsonObject>();
+		ConflictResult->SetBoolField(TEXT("ok"), false);
+		ConflictResult->SetStringField(TEXT("name"), BlueprintName);
+		ConflictResult->SetStringField(TEXT("path"), PackageName);
+		ConflictResult->SetStringField(TEXT("existing_class"), ExistingBlueprint->GeneratedClass ? ExistingBlueprint->GeneratedClass->GetPathName() : TEXT(""));
+		ConflictResult->SetStringField(TEXT("message"), FString::Printf(TEXT("Blueprint '%s' already exists at path '%s'. Use blueprint.add_component to modify it, or delete it first."), *BlueprintName, *PackageName));
+		
+		UAL_CommandUtils::SendError(RequestId, 409, FString::Printf(TEXT(" '%s' 下已经存在同名蓝图 '%s'，请更换新的名字或路径。"), *PackageName,*BlueprintName ));
+		return;
+	}
+	
+	// 也检查 FindPackage 以防万一
+	if (UPackage* ExistingPackage = FindPackage(nullptr, *PackageName))
+	{
+		if (UBlueprint* ExistingBP = FindObject<UBlueprint>(ExistingPackage, *BlueprintName))
+		{
+			UAL_CommandUtils::SendError(RequestId, 409, FString::Printf(TEXT("Blueprint '%s' already exists in package '%s'"), *BlueprintName, *PackageName));
+			return;
+		}
+	}
+	
 	UPackage* Package = CreatePackage(*PackageName);
 	if (!Package)
 	{
