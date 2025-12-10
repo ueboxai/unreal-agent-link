@@ -427,7 +427,9 @@ bool UAL_CommandUtils::ResolveTargetsToActors(const TSharedPtr<FJsonObject>& Tar
 				}
 			}
 		}
-		bHasFilter = !FilterClassContains.IsEmpty() || !FilterNamePattern.IsEmpty() || FilterExcludeClasses.Num() > 0;
+		// 只要 filter 对象存在（即使是空对象 {}），就视为有效的过滤器
+		// 空的 filter 将匹配所有 Actor（MatchFilter lambda 会返回 true）
+		bHasFilter = true;
 	}
 
 	auto MatchFilter = [&](AActor* Actor) -> bool
