@@ -1,0 +1,31 @@
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Dom/JsonObject.h"
+
+/**
+ * 编辑器命令处理器
+ * 包含: editor.screenshot, project.info, take_screenshot
+ * 
+ * 对应文档: 编辑器工具接口文档.md
+ */
+class FUAL_EditorCommands
+{
+public:
+	/**
+	 * 注册所有编辑器相关命令到 CommandMap
+	 * @param CommandMap 命令映射表
+	 */
+	static void RegisterCommands(TMap<FString, TFunction<void(const TSharedPtr<FJsonObject>&, const FString)>>& CommandMap);
+
+	// Public Handlers called by Dispatcher
+	// editor.screenshot / take_screenshot - 抓取当前视口截图
+	static void Handle_TakeScreenshot(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	
+	// project.info - 获取项目信息
+	static void Handle_GetProjectInfo(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	
+	// 构建项目信息（公开给外部使用）
+public:
+	static TSharedPtr<FJsonObject> BuildProjectInfo();
+};

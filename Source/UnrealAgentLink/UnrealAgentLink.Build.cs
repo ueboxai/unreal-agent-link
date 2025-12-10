@@ -8,6 +8,29 @@ public class UnrealAgentLink : ModuleRules
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 		
+		// 添加子目录到 include 路径
+		PublicIncludePaths.AddRange(
+			new string[]
+			{
+				System.IO.Path.Combine(ModuleDirectory, "Public/Core"),
+				System.IO.Path.Combine(ModuleDirectory, "Public/Commands"),
+				System.IO.Path.Combine(ModuleDirectory, "Public/Utils"),
+				System.IO.Path.Combine(ModuleDirectory, "Public/Network"),
+				System.IO.Path.Combine(ModuleDirectory, "Public/Extensions"),
+			}
+		);
+		
+		PrivateIncludePaths.AddRange(
+			new string[]
+			{
+				System.IO.Path.Combine(ModuleDirectory, "Private/Core"),
+				System.IO.Path.Combine(ModuleDirectory, "Private/Commands"),
+				System.IO.Path.Combine(ModuleDirectory, "Private/Utils"),
+				System.IO.Path.Combine(ModuleDirectory, "Private/Network"),
+				System.IO.Path.Combine(ModuleDirectory, "Private/Extensions"),
+			}
+		);
+		
 		PublicDependencyModuleNames.AddRange(
 			new string[]
 			{
@@ -33,10 +56,13 @@ public class UnrealAgentLink : ModuleRules
 				"ToolMenus",
 				"CoreUObject",
 				"Engine",
+				"PhysicsCore",
 				"PythonScriptPlugin",
 				"ContentBrowser",
 				"Slate",
 				"SlateCore",
+				"RenderCore",
+				"RHI",
 			}
 			);
 
