@@ -67,6 +67,15 @@ public:
 
 	static bool ResolveTargetsToActors(const TSharedPtr<FJsonObject>& Targets, UWorld* World, TSet<AActor*>& OutSet, FString& OutError);
 
+	/**
+	 * 检查 Actor 的属性是否匹配指定条件
+	 * @param Actor 要检查的 Actor
+	 * @param PropName 属性名（会自动在 Actor 和 RootComponent 上搜索）
+	 * @param ExpectedValue 期望匹配的值（模糊包含匹配，忽略大小写）
+	 * @return 是否匹配
+	 */
+	static bool CheckPropertyMatch(AActor* Actor, const FString& PropName, const FString& ExpectedValue);
+
 	static bool ApplyStructValue(FStructProperty* StructProp, UObject* Target, const TSharedPtr<FJsonValue>& JsonValue);
 
 	static const TArray<FString>& GetDefaultInspectProps();

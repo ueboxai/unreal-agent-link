@@ -410,6 +410,8 @@ bool UAL_CommandUtils::ResolveTargetsToActors(const TSharedPtr<FJsonObject>& Tar
 	Targets->TryGetObjectField(TEXT("filter"), FilterObj);
 	FString FilterClassContains, FilterNamePattern;
 	TArray<FString> FilterExcludeClasses;
+	// property_match: 属性匹配规则数组 [{ name: "StaticMesh", value: "Cube" }, ...]
+	TArray<TPair<FString, FString>> PropertyMatchRules;
 	bool bHasFilter = false;
 	if (FilterObj && (*FilterObj).IsValid())
 	{
@@ -424,6 +426,21 @@ bool UAL_CommandUtils::ResolveTargetsToActors(const TSharedPtr<FJsonObject>& Tar
 				if (V.IsValid() && V->TryGetString(S))
 				{
 					FilterExcludeClasses.Add(S);
+				}
+			}
+		}
+		// 解析 property_match 数组
+		const TArray<TSharedPtr<FJsonValue>>* PropMatchArr = nullptr;
+		if ((*FilterObj)->TryGetArrayField(TEXT("property_match"), PropMatchArr) && PropMatchArr)
+		{
+			for (const TSharedPtr<FJsonValue>& Item : *PropMatchArr)
+			{
+				if (!Item.IsValid() || Item->Type != EJson::Object) continue;
+				const TSharedPtr<FJsonObject> Rule = Item->AsObject();
+				FString Name, Value;
+				if (Rule->TryGetStringField(TEXT("name"), Name) && Rule->TryGetStringField(TEXT("value"), Value))
+				{
+					PropertyMatchRules.Add(TPair<FString, FString>(Name, Value));
 				}
 			}
 		}
@@ -455,6 +472,14 @@ bool UAL_CommandUtils::ResolveTargetsToActors(const TSharedPtr<FJsonObject>& Tar
 		{
 			const FString Cls = Actor->GetClass() ? Actor->GetClass()->GetName() : FString();
 			if (Cls.Equals(Ex, ESearchCase::IgnoreCase))
+			{
+				return false;
+			}
+		}
+		// property_match 检查：所有规则必须全部匹配（AND 逻辑）
+		for (const TPair<FString, FString>& Rule : PropertyMatchRules)
+		{
+			if (!CheckPropertyMatch(Actor, Rule.Key, Rule.Value))
 			{
 				return false;
 			}
@@ -504,6 +529,80 @@ bool UAL_CommandUtils::ResolveTargetsToActors(const TSharedPtr<FJsonObject>& Tar
 	}
 
 	return true;
+}
+
+bool UAL_CommandUtils::CheckPropertyMatch(AActor* Actor, const FString& PropName, const FString& ExpectedValue)
+{
+	if (!Actor || PropName.IsEmpty() || ExpectedValue.IsEmpty())
+	{
+		return false;
+	}
+
+	// 要搜索的对象列表：Actor 本身 -> RootComponent -> 其他常用组件
+	TArray<UObject*> ObjectsToSearch;
+	ObjectsToSearch.Add(Actor);
+	if (Actor->GetRootComponent())
+	{
+		ObjectsToSearch.Add(Actor->GetRootComponent());
+	}
+
+	for (UObject* TargetObj : ObjectsToSearch)
+	{
+		if (!TargetObj) continue;
+
+		FProperty* Prop = FindFProperty<FProperty>(TargetObj->GetClass(), *PropName);
+		if (!Prop) continue;
+
+		FString ActualValueStr;
+
+		// 特殊处理：对象引用属性 (如 StaticMesh, Material)
+		if (FObjectProperty* ObjProp = CastField<FObjectProperty>(Prop))
+		{
+			UObject* RefObj = ObjProp->GetObjectPropertyValue_InContainer(TargetObj);
+			if (RefObj)
+			{
+				// 获取资产名称 (如 "Cube", "SM_Rock_01")
+				ActualValueStr = RefObj->GetName();
+			}
+		}
+		// 软对象引用
+		else if (FSoftObjectProperty* SoftObjProp = CastField<FSoftObjectProperty>(Prop))
+		{
+			const FSoftObjectPtr* SoftPtr = SoftObjProp->GetPropertyValuePtr_InContainer(TargetObj);
+			if (SoftPtr && !SoftPtr->IsNull())
+			{
+				// 从路径中提取资产名
+				FString AssetPath = SoftPtr->ToString();
+				int32 DotIndex;
+				if (AssetPath.FindLastChar('.', DotIndex))
+				{
+					ActualValueStr = AssetPath.RightChop(DotIndex + 1);
+				}
+				else
+				{
+					ActualValueStr = FPaths::GetBaseFilename(AssetPath);
+				}
+			}
+		}
+		// 其他属性：转为字符串比较
+		else
+		{
+			const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(TargetObj);
+			if (ValuePtr)
+			{
+				// ExportText_InContainer 需要 6 个参数: Index, ValueStr, Container, DefaultContainer, Parent, PortFlags
+				Prop->ExportText_InContainer(0, ActualValueStr, TargetObj, nullptr, TargetObj, PPF_None);
+			}
+		}
+
+		// 执行模糊匹配（包含匹配，忽略大小写）
+		if (!ActualValueStr.IsEmpty() && ActualValueStr.Contains(ExpectedValue, ESearchCase::IgnoreCase))
+		{
+			return true;
+		}
+	}
+
+	return false;
 }
 
 bool UAL_CommandUtils::ApplyStructValue(FStructProperty* StructProp, UObject* Target, const TSharedPtr<FJsonValue>& JsonValue)
