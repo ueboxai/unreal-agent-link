@@ -5,7 +5,7 @@
 
 /**
  * 蓝图命令处理器
- * 包含: blueprint.create, blueprint.add_component
+ * 包含: blueprint.create, blueprint.add_component, blueprint.set_property
  * 
  * 对应文档: 蓝图开发接口文档.md
  */
@@ -24,4 +24,7 @@ public:
 	
 	// blueprint.add_component - 为已存在的蓝图添加组件
 	static void Handle_AddComponentToBlueprint(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	
+	// blueprint.set_property - 设置蓝图属性（支持 CDO 和 SCS 组件）
+	static void Handle_SetBlueprintProperty(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 };

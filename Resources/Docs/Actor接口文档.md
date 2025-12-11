@@ -206,15 +206,26 @@
   - `properties`: 对象，键为属性名，值为目标值。示例：`{"Intensity": 10000.0, "LightColor": {"r": 255, "g": 0, "b": 0}}`
 - **行为与防呆**：
   - 自动 Actor → RootComponent → 其他组件 递归查找属性（避免点光源/网格属性找不到）
-  - 属性不存在：不会直接 404，会返回 `suggestions`（按编辑距离排序），提示可能的正确属性名。
-  - 类型不匹配：返回 `expected_type` 及 `current_value`，帮助 AI 校正格式/类型。
-  - 支持类型：数字（整型/浮点）、bool、string/name/text、FVector、FRotator、FLinearColor、FColor；其它结构会提示不支持。
+  - **特殊属性拦截白名单**（调用专用函数，而非简单反射修改）：
+    - `ActorLabel` / `Label`：调用 `SetActorLabel()`，自动处理名称冲突（若重名则自动加后缀）
+    - `FolderPath`：调用 `SetFolderPath()`，正确刷新世界大纲文件夹归类
+    - `SimulatePhysics` / `bSimulatePhysics`：调用 `SetSimulatePhysics()`，触发物理状态重建
+    - `Mobility`：调用 `SetMobility()`，正确处理光照/导航网格失效。值可为 `"Static"` / `"Stationary"` / `"Movable"`
+    - `Hidden` / `bHidden` / `HiddenInGame`：调用 `SetActorHiddenInGame()`，**运行时隐藏**（编辑器视图中仍可见）
+    - `HiddenInEditor` / `bHiddenInEditor` / `bHiddenEd`：调用 `SetIsTemporarilyHiddenInEditor()`，**编辑器隐藏**（在编辑器视图中立即隐藏/显示）
+    - `Tags`：Actor 标签数组，支持三种模式：
+      - 数组覆盖：`["tag1", "tag2"]` 替换所有标签
+      - 单字符串：`"tag1"` 添加单个标签（不覆盖）
+      - 增删对象：`{ "add": ["tag1"], "remove": ["tag2"] }` 精确控制增删
+  - 属性不存在：不会直接 404，会返回 `suggestions`（按编辑距离排序），提示可能的正确属性名
+  - 类型不匹配：返回 `expected_type` 及 `current_value`，帮助 AI 校正格式/类型
+  - 支持类型：数字（整型/浮点）、bool、string/name/text、FVector、FRotator、FLinearColor、FColor；其它结构会提示不支持
 - **Response**：
   - `count`: 成功修改的 Actor 数量
   - `actors`: 数组
     - `name`, `class`, `path`
     - `updated`: 成功写入的键值
-    - `errors`: 可选数组，包含 `{ property, error, suggestions?, expected_type?, current_value? }`
+    - `errors`: 可选数组，包含 `{ property, error, suggestions?, expected_type?, current_value? }`；对于 ActorLabel 名称冲突场景，会返回 `{ property, warning, requested, actual }`
 
 - **示例**
 ```json
@@ -244,6 +255,128 @@
         }
       }
     ]
+  }
+}
+```
+
+- **示例 2：重命名 Actor（修改 ActorLabel）**
+```json
+{
+  "method": "actor.set_property",
+  "params": {
+    "targets": { "names": ["Floor"] },
+    "properties": {
+      "ActorLabel": "MainFloor"
+    }
+  }
+}
+```
+```json
+{
+  "code": 200,
+  "result": {
+    "count": 1,
+    "actors": [
+      {
+        "name": "MainFloor",
+        "class": "StaticMeshActor",
+        "updated": {
+          "ActorLabel": "MainFloor"
+        }
+      }
+    ]
+  }
+}
+```
+
+- **示例 3：归类到大纲文件夹（FolderPath）**
+```json
+{
+  "method": "actor.set_property",
+  "params": {
+    "targets": { "filter": { "class": "SpotLight" } },
+    "properties": {
+      "FolderPath": "Lighting/SpotLights"
+    }
+  }
+}
+```
+
+- **示例 4：开启物理模拟（SimulatePhysics）**
+```json
+{
+  "method": "actor.set_property",
+  "params": {
+    "targets": { "names": ["Cup_01"] },
+    "properties": {
+      "SimulatePhysics": true,
+      "Mobility": "Movable"
+    }
+  }
+}
+```
+
+- **示例 5：隐藏 Actor - 运行时隐藏（bHidden）**
+```json
+{
+  "method": "actor.set_property",
+  "params": {
+    "targets": { "names": ["DebugHelper"] },
+    "properties": {
+      "bHidden": true
+    }
+  }
+}
+```
+
+- **示例 6：隐藏 Actor - 编辑器隐藏（HiddenInEditor）**
+```json
+{
+  "method": "actor.set_property",
+  "params": {
+    "targets": { "names": ["ConstructionGuide"] },
+    "properties": {
+      "HiddenInEditor": true
+    }
+  }
+}
+```
+
+- **示例 7：添加标签 - 单个标签**
+```json
+{
+  "method": "actor.set_property",
+  "params": {
+    "targets": { "filter": { "name_pattern": "test_*" } },
+    "properties": {
+      "Tags": "test"
+    }
+  }
+}
+```
+
+- **示例 8：设置标签 - 覆盖所有标签**
+```json
+{
+  "method": "actor.set_property",
+  "params": {
+    "targets": { "names": ["Player_Start"] },
+    "properties": {
+      "Tags": ["PlayerSpawn", "Important", "DoNotDelete"]
+    }
+  }
+}
+```
+
+- **示例 9：增删标签 - 精确控制**
+```json
+{
+  "method": "actor.set_property",
+  "params": {
+    "targets": { "names": ["OldActor"] },
+    "properties": {
+      "Tags": { "add": ["NewTag"], "remove": ["DeprecatedTag"] }
+    }
   }
 }
 ```

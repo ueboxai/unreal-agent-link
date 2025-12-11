@@ -801,6 +801,313 @@ void FUAL_ActorCommands::Handle_SetProperty(const TSharedPtr<FJsonObject>& Paylo
 			const FString PropName = Pair.Key;
 			const TSharedPtr<FJsonValue>& DesiredValue = Pair.Value;
 
+			// 特殊处理 ActorLabel：它是 Editor-Only 属性，需要调用专用函数 SetActorLabel
+			// 该函数会自动处理名称冲突（自动添加后缀），而不是简单的内存读写
+#if WITH_EDITOR
+			if (PropName.Equals(TEXT("ActorLabel"), ESearchCase::IgnoreCase) ||
+				PropName.Equals(TEXT("Label"), ESearchCase::IgnoreCase))
+			{
+				FString NewLabel;
+				if (DesiredValue.IsValid() && DesiredValue->TryGetString(NewLabel) && !NewLabel.IsEmpty())
+				{
+					const FString OldLabel = Actor->GetActorLabel();
+					Actor->SetActorLabel(NewLabel);
+					const FString FinalLabel = Actor->GetActorLabel();
+					
+					Updated->SetStringField(TEXT("ActorLabel"), FinalLabel);
+					
+					// 如果最终标签与请求的不同，说明发生了名称冲突自动加后缀
+					if (!FinalLabel.Equals(NewLabel))
+					{
+						TSharedPtr<FJsonObject> Warning = MakeShared<FJsonObject>();
+						Warning->SetStringField(TEXT("property"), TEXT("ActorLabel"));
+						Warning->SetStringField(TEXT("warning"), TEXT("Name conflict resolved with suffix"));
+						Warning->SetStringField(TEXT("requested"), NewLabel);
+						Warning->SetStringField(TEXT("actual"), FinalLabel);
+						Errors.Add(MakeShared<FJsonValueObject>(Warning));
+					}
+				}
+				else
+				{
+					TSharedPtr<FJsonObject> Err = MakeShared<FJsonObject>();
+					Err->SetStringField(TEXT("property"), PropName);
+					Err->SetStringField(TEXT("error"), TEXT("ActorLabel must be a non-empty string"));
+					Errors.Add(MakeShared<FJsonValueObject>(Err));
+				}
+				continue;
+			}
+#endif
+
+			// ========== 特殊属性拦截白名单 ==========
+			// 以下属性在用户眼中是"属性"，但在 C++ 底层是"函数调用"或需要触发状态重建
+			// 直接通过反射修改内存值不会生效，或不会触发渲染/物理更新
+
+			// 1. FolderPath (世界大纲文件夹)
+			// 直接改变量不会刷新大纲视图，必须调用 SetFolderPath
+#if WITH_EDITOR
+			if (PropName.Equals(TEXT("FolderPath"), ESearchCase::IgnoreCase))
+			{
+				FString NewPath;
+				if (DesiredValue.IsValid() && DesiredValue->TryGetString(NewPath))
+				{
+					Actor->SetFolderPath(FName(*NewPath));
+					Updated->SetStringField(TEXT("FolderPath"), Actor->GetFolderPath().ToString());
+				}
+				else
+				{
+					TSharedPtr<FJsonObject> Err = MakeShared<FJsonObject>();
+					Err->SetStringField(TEXT("property"), PropName);
+					Err->SetStringField(TEXT("error"), TEXT("FolderPath must be a string"));
+					Errors.Add(MakeShared<FJsonValueObject>(Err));
+				}
+				continue;
+			}
+#endif
+
+			// 2. SimulatePhysics (物理模拟)
+			// 这是 RootComponent (UPrimitiveComponent) 的属性，必须调用 SetSimulatePhysics 触发物理状态重建
+			if (PropName.Equals(TEXT("SimulatePhysics"), ESearchCase::IgnoreCase) ||
+				PropName.Equals(TEXT("bSimulatePhysics"), ESearchCase::IgnoreCase))
+			{
+				bool bSimulate = false;
+				if (DesiredValue.IsValid() && DesiredValue->TryGetBool(bSimulate))
+				{
+					UPrimitiveComponent* PrimComp = Cast<UPrimitiveComponent>(Actor->GetRootComponent());
+					if (PrimComp)
+					{
+						PrimComp->SetSimulatePhysics(bSimulate);
+						Updated->SetBoolField(TEXT("SimulatePhysics"), PrimComp->IsSimulatingPhysics());
+					}
+					else
+					{
+						TSharedPtr<FJsonObject> Err = MakeShared<FJsonObject>();
+						Err->SetStringField(TEXT("property"), PropName);
+						Err->SetStringField(TEXT("error"), TEXT("Actor has no UPrimitiveComponent as RootComponent"));
+						Errors.Add(MakeShared<FJsonValueObject>(Err));
+					}
+				}
+				else
+				{
+					TSharedPtr<FJsonObject> Err = MakeShared<FJsonObject>();
+					Err->SetStringField(TEXT("property"), PropName);
+					Err->SetStringField(TEXT("error"), TEXT("SimulatePhysics must be a boolean"));
+					Errors.Add(MakeShared<FJsonValueObject>(Err));
+				}
+				continue;
+			}
+
+			// 3. Mobility (移动性)
+			// 修改移动性涉及光照失效、导航网格失效等，必须调用 SetMobility
+			if (PropName.Equals(TEXT("Mobility"), ESearchCase::IgnoreCase))
+			{
+				USceneComponent* RootComp = Actor->GetRootComponent();
+				if (RootComp)
+				{
+					FString MobilityStr;
+					EComponentMobility::Type NewMobility = RootComp->Mobility;
+					bool bValidInput = false;
+
+					if (DesiredValue.IsValid() && DesiredValue->TryGetString(MobilityStr))
+					{
+						if (MobilityStr.Equals(TEXT("Static"), ESearchCase::IgnoreCase))
+						{
+							NewMobility = EComponentMobility::Static;
+							bValidInput = true;
+						}
+						else if (MobilityStr.Equals(TEXT("Stationary"), ESearchCase::IgnoreCase))
+						{
+							NewMobility = EComponentMobility::Stationary;
+							bValidInput = true;
+						}
+						else if (MobilityStr.Equals(TEXT("Movable"), ESearchCase::IgnoreCase))
+						{
+							NewMobility = EComponentMobility::Movable;
+							bValidInput = true;
+						}
+					}
+					else
+					{
+						// 尝试数字输入
+						int32 MobilityInt = 0;
+						if (DesiredValue.IsValid() && DesiredValue->TryGetNumber(MobilityInt))
+						{
+							if (MobilityInt >= 0 && MobilityInt <= 2)
+							{
+								NewMobility = static_cast<EComponentMobility::Type>(MobilityInt);
+								bValidInput = true;
+							}
+						}
+					}
+
+					if (bValidInput)
+					{
+						RootComp->SetMobility(NewMobility);
+						
+						// 返回字符串形式的移动性
+						FString ResultMobility;
+						switch (RootComp->Mobility)
+						{
+						case EComponentMobility::Static: ResultMobility = TEXT("Static"); break;
+						case EComponentMobility::Stationary: ResultMobility = TEXT("Stationary"); break;
+						case EComponentMobility::Movable: ResultMobility = TEXT("Movable"); break;
+						default: ResultMobility = TEXT("Unknown"); break;
+						}
+						Updated->SetStringField(TEXT("Mobility"), ResultMobility);
+					}
+					else
+					{
+						TSharedPtr<FJsonObject> Err = MakeShared<FJsonObject>();
+						Err->SetStringField(TEXT("property"), PropName);
+						Err->SetStringField(TEXT("error"), TEXT("Mobility must be 'Static', 'Stationary', or 'Movable'"));
+						Errors.Add(MakeShared<FJsonValueObject>(Err));
+					}
+				}
+				else
+				{
+					TSharedPtr<FJsonObject> Err = MakeShared<FJsonObject>();
+					Err->SetStringField(TEXT("property"), PropName);
+					Err->SetStringField(TEXT("error"), TEXT("Actor has no RootComponent"));
+					Errors.Add(MakeShared<FJsonValueObject>(Err));
+				}
+				continue;
+			}
+
+			// 4. Hidden / bHidden (运行时显隐)
+			// 调用 SetActorHiddenInGame，处理网络同步和子组件递归显隐
+			// 注意：这是运行时隐藏，在编辑器视图中可能仍然可见
+			if (PropName.Equals(TEXT("Hidden"), ESearchCase::IgnoreCase) ||
+				PropName.Equals(TEXT("bHidden"), ESearchCase::IgnoreCase) ||
+				PropName.Equals(TEXT("HiddenInGame"), ESearchCase::IgnoreCase) ||
+				PropName.Equals(TEXT("bHiddenInGame"), ESearchCase::IgnoreCase))
+			{
+				bool bHidden = false;
+				if (DesiredValue.IsValid() && DesiredValue->TryGetBool(bHidden))
+				{
+					Actor->SetActorHiddenInGame(bHidden);
+					Updated->SetBoolField(TEXT("bHidden"), Actor->IsHidden());
+				}
+				else
+				{
+					TSharedPtr<FJsonObject> Err = MakeShared<FJsonObject>();
+					Err->SetStringField(TEXT("property"), PropName);
+					Err->SetStringField(TEXT("error"), TEXT("bHidden must be a boolean"));
+					Errors.Add(MakeShared<FJsonValueObject>(Err));
+				}
+				continue;
+			}
+
+			// 5. HiddenInEditor / bHiddenEd (编辑器模式显隐)
+			// 调用 SetIsTemporarilyHiddenInEditor，在编辑器视图中立即隐藏/显示
+#if WITH_EDITOR
+			if (PropName.Equals(TEXT("HiddenInEditor"), ESearchCase::IgnoreCase) ||
+				PropName.Equals(TEXT("bHiddenInEditor"), ESearchCase::IgnoreCase) ||
+				PropName.Equals(TEXT("bHiddenEd"), ESearchCase::IgnoreCase))
+			{
+				bool bHidden = false;
+				if (DesiredValue.IsValid() && DesiredValue->TryGetBool(bHidden))
+				{
+					Actor->SetIsTemporarilyHiddenInEditor(bHidden);
+					Updated->SetBoolField(TEXT("bHiddenInEditor"), Actor->IsTemporarilyHiddenInEditor());
+				}
+				else
+				{
+					TSharedPtr<FJsonObject> Err = MakeShared<FJsonObject>();
+					Err->SetStringField(TEXT("property"), PropName);
+					Err->SetStringField(TEXT("error"), TEXT("bHiddenInEditor must be a boolean"));
+					Errors.Add(MakeShared<FJsonValueObject>(Err));
+				}
+				continue;
+			}
+#endif
+
+			// 6. Tags (Actor 标签数组)
+			// Actor::Tags 是 TArray<FName>，需要特殊处理
+			// 支持：1) 数组覆盖 ["tag1", "tag2"]
+			//       2) 单字符串添加 "tag1"
+			//       3) 对象操作 { "add": ["tag1"], "remove": ["tag2"] }
+			if (PropName.Equals(TEXT("Tags"), ESearchCase::IgnoreCase))
+			{
+				bool bSuccess = false;
+				
+				// 尝试解析为数组（覆盖模式）
+				const TArray<TSharedPtr<FJsonValue>>* TagsArray = nullptr;
+				if (DesiredValue.IsValid() && DesiredValue->TryGetArray(TagsArray) && TagsArray)
+				{
+					Actor->Tags.Empty();
+					for (const TSharedPtr<FJsonValue>& TagVal : *TagsArray)
+					{
+						FString TagStr;
+						if (TagVal.IsValid() && TagVal->TryGetString(TagStr) && !TagStr.IsEmpty())
+						{
+							Actor->Tags.AddUnique(FName(*TagStr));
+						}
+					}
+					bSuccess = true;
+				}
+				// 尝试解析为对象（增删模式）
+				else if (const TSharedPtr<FJsonObject>* TagsObj = nullptr; 
+						 DesiredValue.IsValid() && DesiredValue->TryGetObject(TagsObj) && TagsObj && TagsObj->IsValid())
+				{
+					// 处理 add
+					const TArray<TSharedPtr<FJsonValue>>* AddArray = nullptr;
+					if ((*TagsObj)->TryGetArrayField(TEXT("add"), AddArray) && AddArray)
+					{
+						for (const TSharedPtr<FJsonValue>& TagVal : *AddArray)
+						{
+							FString TagStr;
+							if (TagVal.IsValid() && TagVal->TryGetString(TagStr) && !TagStr.IsEmpty())
+							{
+								Actor->Tags.AddUnique(FName(*TagStr));
+							}
+						}
+					}
+					// 处理 remove
+					const TArray<TSharedPtr<FJsonValue>>* RemoveArray = nullptr;
+					if ((*TagsObj)->TryGetArrayField(TEXT("remove"), RemoveArray) && RemoveArray)
+					{
+						for (const TSharedPtr<FJsonValue>& TagVal : *RemoveArray)
+						{
+							FString TagStr;
+							if (TagVal.IsValid() && TagVal->TryGetString(TagStr) && !TagStr.IsEmpty())
+							{
+								Actor->Tags.Remove(FName(*TagStr));
+							}
+						}
+					}
+					bSuccess = true;
+				}
+				// 尝试解析为单字符串（添加单个标签）
+				else
+				{
+					FString SingleTag;
+					if (DesiredValue.IsValid() && DesiredValue->TryGetString(SingleTag) && !SingleTag.IsEmpty())
+					{
+						Actor->Tags.AddUnique(FName(*SingleTag));
+						bSuccess = true;
+					}
+				}
+
+				if (bSuccess)
+				{
+					// 返回当前所有标签
+					TArray<TSharedPtr<FJsonValue>> TagsJson;
+					for (const FName& Tag : Actor->Tags)
+					{
+						TagsJson.Add(MakeShared<FJsonValueString>(Tag.ToString()));
+					}
+					Updated->SetArrayField(TEXT("Tags"), TagsJson);
+				}
+				else
+				{
+					TSharedPtr<FJsonObject> Err = MakeShared<FJsonObject>();
+					Err->SetStringField(TEXT("property"), PropName);
+					Err->SetStringField(TEXT("error"), TEXT("Tags must be a string, array of strings, or object with 'add'/'remove' arrays"));
+					Errors.Add(MakeShared<FJsonValueObject>(Err));
+				}
+				continue;
+			}
+
+			// ========== 通用属性处理 ==========
 			UObject* TargetObj = nullptr;
 			FProperty* Prop = UAL_CommandUtils::FindWritablePropertyOnActorHierarchy(Actor, PropName, TargetObj);
 

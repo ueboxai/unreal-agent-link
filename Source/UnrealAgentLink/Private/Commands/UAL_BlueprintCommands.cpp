@@ -26,6 +26,11 @@ void FUAL_BlueprintCommands::RegisterCommands(TMap<FString, TFunction<void(const
 	{
 		Handle_AddComponentToBlueprint(Payload, RequestId);
 	});
+	
+	CommandMap.Add(TEXT("blueprint.set_property"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_SetBlueprintProperty(Payload, RequestId);
+	});
 }
 
 // ========== 从 UAL_CommandHandler.cpp 迁移以下函数 ==========
@@ -547,4 +552,295 @@ void FUAL_BlueprintCommands::Handle_AddComponentToBlueprint(const TSharedPtr<FJs
 		*ComponentName, *ComponentClass->GetName(), *Blueprint->GetName()));
 
 	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
+}
+
+/**
+ * 设置蓝图属性（支持 CDO 默认值和 SCS 组件属性）
+ * 
+ * 请求参数:
+ *   - blueprint_path: 蓝图路径（必填）
+ *   - component_name: 组件名称（可选，为空则修改蓝图默认值 CDO，否则修改指定组件）
+ *   - properties: 属性键值对（必填）
+ *   - auto_compile: 是否自动编译（可选，默认 true）
+ * 
+ * 返回:
+ *   - ok: 是否成功
+ *   - blueprint_path: 蓝图路径
+ *   - target_type: 修改的目标类型（"cdo" 或 "component"）
+ *   - component_name: 组件名称（仅当修改组件时）
+ *   - modified_properties: 成功修改的属性列表
+ *   - failed_properties: 修改失败的属性列表（含错误信息）
+ *   - compiled: 是否已编译
+ *   - saved: 是否已保存
+ */
+void FUAL_BlueprintCommands::Handle_SetBlueprintProperty(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+	// 1. 解析必填参数 blueprint_path
+	FString BlueprintPath;
+	if (!Payload->TryGetStringField(TEXT("blueprint_path"), BlueprintPath) || BlueprintPath.IsEmpty())
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required field: blueprint_path"));
+		return;
+	}
+
+	// 2. 解析 properties
+	const TSharedPtr<FJsonObject>* PropertiesPtr = nullptr;
+	if (!Payload->TryGetObjectField(TEXT("properties"), PropertiesPtr) || !PropertiesPtr || !(*PropertiesPtr).IsValid())
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required field: properties"));
+		return;
+	}
+	const TSharedPtr<FJsonObject>& Properties = *PropertiesPtr;
+
+	// 3. 解析可选参数
+	FString ComponentName;
+	Payload->TryGetStringField(TEXT("component_name"), ComponentName);
+	
+	bool bAutoCompile = true;
+	if (Payload->HasField(TEXT("auto_compile")))
+	{
+		bAutoCompile = Payload->GetBoolField(TEXT("auto_compile"));
+	}
+
+	// 4. 加载蓝图资产
+	UBlueprint* Blueprint = nullptr;
+	
+	// 尝试直接加载
+	if (BlueprintPath.StartsWith(TEXT("/")))
+	{
+		FString FullPath = BlueprintPath;
+		if (!FullPath.Contains(TEXT(".")))
+		{
+			FullPath = FullPath + TEXT(".") + FPaths::GetBaseFilename(BlueprintPath);
+		}
+		Blueprint = LoadObject<UBlueprint>(nullptr, *FullPath);
+	}
+	
+	// 如果直接加载失败，通过 AssetRegistry 查找
+	if (!Blueprint)
+	{
+		IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
+		
+		TArray<FAssetData> AssetList;
+		FARFilter Filter;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+		Filter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
+#else
+		Filter.ClassNames.Add(UBlueprint::StaticClass()->GetFName());
+#endif
+		Filter.bRecursiveClasses = true;
+		AssetRegistry.GetAssets(Filter, AssetList);
+		
+		for (const FAssetData& Asset : AssetList)
+		{
+			FString AssetName = Asset.AssetName.ToString();
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+			FString AssetPath = Asset.GetObjectPathString();
+#else
+			FString AssetPath = Asset.ObjectPath.ToString();
+#endif
+			if (AssetName.Equals(BlueprintPath, ESearchCase::IgnoreCase) ||
+				AssetPath.Contains(BlueprintPath))
+			{
+				Blueprint = Cast<UBlueprint>(Asset.GetAsset());
+				break;
+			}
+		}
+	}
+
+	if (!Blueprint)
+	{
+		UAL_CommandUtils::SendError(RequestId, 404, FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		return;
+	}
+
+	// 5. 确定目标对象（CDO 或 SCS 组件）
+	UObject* TargetObject = nullptr;
+	FString TargetType;
+	UClass* TargetClass = nullptr;
+
+	if (ComponentName.IsEmpty())
+	{
+		// 修改蓝图默认值（CDO）
+		if (!Blueprint->GeneratedClass)
+		{
+			UAL_CommandUtils::SendError(RequestId, 500, TEXT("Blueprint has no generated class, please compile it first"));
+			return;
+		}
+		TargetObject = Blueprint->GeneratedClass->GetDefaultObject();
+		TargetClass = Blueprint->GeneratedClass;
+		TargetType = TEXT("cdo");
+		UE_LOG(LogUALBlueprint, Log, TEXT("[blueprint.set_property] Target: CDO of %s"), *Blueprint->GetName());
+	}
+	else
+	{
+		// 修改 SCS 组件属性
+		USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
+		if (SCS)
+		{
+			for (USCS_Node* Node : SCS->GetAllNodes())
+			{
+				if (Node && Node->GetVariableName().ToString().Equals(ComponentName, ESearchCase::IgnoreCase))
+				{
+					TargetObject = Node->ComponentTemplate;
+					TargetClass = Node->ComponentClass;
+					break;
+				}
+			}
+		}
+		
+		// Fallback: 尝试在 CDO 中查找同名子对象（针对 C++ 继承的组件）
+		if (!TargetObject && Blueprint->GeneratedClass)
+		{
+			UObject* CDO = Blueprint->GeneratedClass->GetDefaultObject();
+			if (CDO)
+			{
+				TArray<UObject*> SubObjects;
+				GetObjectsWithOuter(CDO, SubObjects, false);
+				for (UObject* SubObj : SubObjects)
+				{
+					if (SubObj && SubObj->GetName().Equals(ComponentName, ESearchCase::IgnoreCase))
+					{
+						TargetObject = SubObj;
+						TargetClass = SubObj->GetClass();
+						break;
+					}
+				}
+			}
+		}
+		
+		if (!TargetObject)
+		{
+			UAL_CommandUtils::SendError(RequestId, 404, FString::Printf(TEXT("Component '%s' not found in blueprint '%s'"), *ComponentName, *Blueprint->GetName()));
+			return;
+		}
+		TargetType = TEXT("component");
+		UE_LOG(LogUALBlueprint, Log, TEXT("[blueprint.set_property] Target: Component '%s' in %s"), *ComponentName, *Blueprint->GetName());
+	}
+
+	// 6. 应用属性
+	TArray<TSharedPtr<FJsonValue>> ModifiedPropsArray;
+	TArray<TSharedPtr<FJsonValue>> FailedPropsArray;
+
+	for (auto& Pair : Properties->Values)
+	{
+		const FString& PropName = Pair.Key;
+		const TSharedPtr<FJsonValue>& PropValue = Pair.Value;
+		
+		// 查找属性
+		FProperty* Prop = TargetClass ? TargetClass->FindPropertyByName(FName(*PropName)) : nullptr;
+		if (!Prop && TargetObject)
+		{
+			Prop = TargetObject->GetClass()->FindPropertyByName(FName(*PropName));
+		}
+		
+		if (!Prop)
+		{
+			TSharedPtr<FJsonObject> FailInfo = MakeShared<FJsonObject>();
+			FailInfo->SetStringField(TEXT("property"), PropName);
+			FailInfo->SetStringField(TEXT("error"), TEXT("Property not found"));
+			
+			// 提供建议
+			TArray<FString> AllProps;
+			UAL_CommandUtils::CollectPropertyNames(TargetObject, AllProps);
+			TArray<FString> Suggestions;
+			UAL_CommandUtils::SuggestProperties(PropName, AllProps, Suggestions, 3);
+			if (Suggestions.Num() > 0)
+			{
+				TArray<TSharedPtr<FJsonValue>> SuggestArr;
+				for (const FString& Sug : Suggestions)
+				{
+					SuggestArr.Add(MakeShared<FJsonValueString>(Sug));
+				}
+				FailInfo->SetArrayField(TEXT("suggestions"), SuggestArr);
+			}
+			
+			FailedPropsArray.Add(MakeShared<FJsonValueObject>(FailInfo));
+			continue;
+		}
+
+		// 设置属性值
+		FString PropError;
+		bool bSuccess = UAL_CommandUtils::SetSimpleProperty(Prop, TargetObject, PropValue, PropError);
+		
+		if (bSuccess)
+		{
+			TSharedPtr<FJsonObject> ModInfo = MakeShared<FJsonObject>();
+			ModInfo->SetStringField(TEXT("property"), PropName);
+			ModInfo->SetStringField(TEXT("type"), Prop->GetClass()->GetName());
+			ModifiedPropsArray.Add(MakeShared<FJsonValueObject>(ModInfo));
+			UE_LOG(LogUALBlueprint, Log, TEXT("[blueprint.set_property] Set '%s' successfully"), *PropName);
+		}
+		else
+		{
+			TSharedPtr<FJsonObject> FailInfo = MakeShared<FJsonObject>();
+			FailInfo->SetStringField(TEXT("property"), PropName);
+			FailInfo->SetStringField(TEXT("error"), PropError.IsEmpty() ? TEXT("Failed to set property") : PropError);
+			FailedPropsArray.Add(MakeShared<FJsonValueObject>(FailInfo));
+			UE_LOG(LogUALBlueprint, Warning, TEXT("[blueprint.set_property] Failed to set '%s': %s"), *PropName, *PropError);
+		}
+	}
+
+	// 7. 标记蓝图已修改
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+	// 8. 编译蓝图（如果需要）
+	bool bCompiled = false;
+	if (bAutoCompile)
+	{
+		FKismetEditorUtilities::CompileBlueprint(Blueprint);
+		bCompiled = true;
+		UE_LOG(LogUALBlueprint, Log, TEXT("[blueprint.set_property] Blueprint compiled"));
+	}
+
+	// 9. 保存蓝图
+	bool bSaved = false;
+	UPackage* Package = Blueprint->GetOutermost();
+	if (Package)
+	{
+		const FString PackageName = Package->GetName();
+		const FString PackageFileName = FPackageName::LongPackageNameToFilename(PackageName, FPackageName::GetAssetPackageExtension());
+		FSavePackageArgs SaveArgs;
+		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+		UPackage::SavePackage(Package, Blueprint, *PackageFileName, SaveArgs);
+		bSaved = true;
+	}
+
+	// 10. 构建响应
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("ok"), FailedPropsArray.Num() == 0 || ModifiedPropsArray.Num() > 0);
+	Result->SetStringField(TEXT("blueprint_path"), Blueprint->GetPathName());
+	Result->SetStringField(TEXT("blueprint_name"), Blueprint->GetName());
+	Result->SetStringField(TEXT("target_type"), TargetType);
+	
+	if (!ComponentName.IsEmpty())
+	{
+		Result->SetStringField(TEXT("component_name"), ComponentName);
+	}
+	
+	Result->SetArrayField(TEXT("modified_properties"), ModifiedPropsArray);
+	Result->SetArrayField(TEXT("failed_properties"), FailedPropsArray);
+	Result->SetBoolField(TEXT("compiled"), bCompiled);
+	Result->SetBoolField(TEXT("saved"), bSaved);
+	
+	// 生成消息
+	FString Message;
+	if (ModifiedPropsArray.Num() > 0 && FailedPropsArray.Num() == 0)
+	{
+		Message = FString::Printf(TEXT("Successfully set %d properties on %s '%s'"), 
+			ModifiedPropsArray.Num(), *TargetType, ComponentName.IsEmpty() ? *Blueprint->GetName() : *ComponentName);
+	}
+	else if (ModifiedPropsArray.Num() > 0 && FailedPropsArray.Num() > 0)
+	{
+		Message = FString::Printf(TEXT("Partially set properties: %d succeeded, %d failed"), 
+			ModifiedPropsArray.Num(), FailedPropsArray.Num());
+	}
+	else
+	{
+		Message = FString::Printf(TEXT("Failed to set any properties"));
+	}
+	Result->SetStringField(TEXT("message"), Message);
+
+	int32 Code = (FailedPropsArray.Num() == 0) ? 200 : (ModifiedPropsArray.Num() > 0 ? 207 : 400);
+	UAL_CommandUtils::SendResponse(RequestId, Code, Result);
 }
