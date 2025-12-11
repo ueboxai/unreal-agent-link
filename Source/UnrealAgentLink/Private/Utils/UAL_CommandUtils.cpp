@@ -18,6 +18,7 @@
 #include "JsonObjectConverter.h"
 #include "Algo/Sort.h"
 #include "Misc/EngineVersion.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogUALUtils, Log, All);
 
@@ -1312,6 +1313,254 @@ bool UAL_CommandUtils::SetSimpleProperty(FProperty* Prop, UObject* Obj, const TS
 	if (FStructProperty* StructProp = CastField<FStructProperty>(Prop))
 	{
 		return SetStructProperty(StructProp, Obj, Value, OutError);
+	}
+
+	// === FObjectProperty 支持（硬引用，如 StaticMesh, Material 等） ===
+	if (FObjectProperty* ObjProp = CastField<FObjectProperty>(Prop))
+	{
+		// 从 JSON 获取资产路径字符串
+		FString AssetPath;
+		if (Value->Type == EJson::String)
+		{
+			AssetPath = Value->AsString();
+		}
+		else if (Value->Type == EJson::Object)
+		{
+			// 支持对象格式: { "path": "/Game/..." } 或 { "asset_path": "..." }
+			const TSharedPtr<FJsonObject> ObjVal = Value->AsObject();
+			if (!ObjVal->TryGetStringField(TEXT("path"), AssetPath))
+			{
+				ObjVal->TryGetStringField(TEXT("asset_path"), AssetPath);
+			}
+		}
+		else if (Value->Type == EJson::Null)
+		{
+			// 允许设置为 null（清空引用）
+			void* Ptr = ObjProp->ContainerPtrToValuePtr<void>(Obj);
+			if (Ptr)
+			{
+				ObjProp->SetPropertyValue(Ptr, nullptr);
+				UE_LOG(LogUALUtils, Log, TEXT("[SetSimpleProperty] Cleared object reference for '%s'"), *Prop->GetName());
+				return true;
+			}
+			return false;
+		}
+		else
+		{
+			OutError = TEXT("expects a string (asset path) or object with 'path' field, or null");
+			return false;
+		}
+
+		if (AssetPath.IsEmpty())
+		{
+			OutError = TEXT("empty asset path provided");
+			return false;
+		}
+
+		// 尝试加载资产
+		UObject* LoadedAsset = nullptr;
+		
+		// 尝试不同的路径格式
+		TArray<FString> PathsToTry;
+		PathsToTry.Add(AssetPath);  // 原始路径
+		
+		// 如果路径不包含资产名后缀，尝试添加
+		if (!AssetPath.Contains(TEXT(".")))
+		{
+			FString BaseName = FPaths::GetBaseFilename(AssetPath);
+			PathsToTry.Add(AssetPath + TEXT(".") + BaseName);
+		}
+		
+		// 如果不是完整路径，尝试常见前缀
+		if (!AssetPath.StartsWith(TEXT("/")))
+		{
+			PathsToTry.Add(TEXT("/Game/") + AssetPath);
+			PathsToTry.Add(TEXT("/Engine/") + AssetPath);
+		}
+
+		for (const FString& PathToTry : PathsToTry)
+		{
+			LoadedAsset = LoadObject<UObject>(nullptr, *PathToTry);
+			if (LoadedAsset)
+			{
+				UE_LOG(LogUALUtils, Log, TEXT("[SetSimpleProperty] Loaded asset from path: %s"), *PathToTry);
+				break;
+			}
+		}
+
+		if (!LoadedAsset)
+		{
+			// 尝试通过 AssetRegistry 查找（模糊匹配）
+			IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
+			
+			TArray<FAssetData> AssetList;
+			FString SearchName = FPaths::GetBaseFilename(AssetPath);
+			
+			// 尝试获取期望的资产类
+			UClass* ExpectedClass = ObjProp->PropertyClass;
+			FARFilter Filter;
+			if (ExpectedClass)
+			{
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+				Filter.ClassPaths.Add(ExpectedClass->GetClassPathName());
+#else
+				Filter.ClassNames.Add(ExpectedClass->GetFName());
+#endif
+			}
+			Filter.bRecursiveClasses = true;
+			AssetRegistry.GetAssets(Filter, AssetList);
+			
+			// 查找匹配的资产
+			for (const FAssetData& Asset : AssetList)
+			{
+				FString AssetName = Asset.AssetName.ToString();
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+				FString FoundPath = Asset.GetObjectPathString();
+#else
+				FString FoundPath = Asset.ObjectPath.ToString();
+#endif
+				// 精确匹配或包含匹配
+				if (AssetName.Equals(SearchName, ESearchCase::IgnoreCase) ||
+					FoundPath.Contains(AssetPath, ESearchCase::IgnoreCase))
+				{
+					LoadedAsset = Asset.GetAsset();
+					if (LoadedAsset)
+					{
+						UE_LOG(LogUALUtils, Log, TEXT("[SetSimpleProperty] Found asset via registry: %s"), *FoundPath);
+						break;
+					}
+				}
+			}
+		}
+
+		if (!LoadedAsset)
+		{
+			OutError = FString::Printf(TEXT("Failed to load asset: %s (expected type: %s)"), 
+				*AssetPath, ObjProp->PropertyClass ? *ObjProp->PropertyClass->GetName() : TEXT("Unknown"));
+			return false;
+		}
+
+		// 验证类型兼容性
+		if (ObjProp->PropertyClass && !LoadedAsset->IsA(ObjProp->PropertyClass))
+		{
+			OutError = FString::Printf(TEXT("Asset type mismatch: loaded '%s' but expected '%s'"),
+				*LoadedAsset->GetClass()->GetName(), *ObjProp->PropertyClass->GetName());
+			return false;
+		}
+
+		// 设置属性值
+		void* Ptr = ObjProp->ContainerPtrToValuePtr<void>(Obj);
+		if (!Ptr)
+		{
+			OutError = TEXT("Failed to get property value pointer");
+			return false;
+		}
+		ObjProp->SetPropertyValue(Ptr, LoadedAsset);
+		UE_LOG(LogUALUtils, Log, TEXT("[SetSimpleProperty] Successfully set object property '%s' to '%s'"),
+			*Prop->GetName(), *LoadedAsset->GetPathName());
+		return true;
+	}
+
+	// === FSoftObjectProperty 支持（软引用） ===
+	if (FSoftObjectProperty* SoftObjProp = CastField<FSoftObjectProperty>(Prop))
+	{
+		FString AssetPath;
+		if (Value->Type == EJson::String)
+		{
+			AssetPath = Value->AsString();
+		}
+		else if (Value->Type == EJson::Null)
+		{
+			void* Ptr = SoftObjProp->ContainerPtrToValuePtr<void>(Obj);
+			if (Ptr)
+			{
+				*static_cast<FSoftObjectPtr*>(Ptr) = FSoftObjectPtr();
+				return true;
+			}
+			return false;
+		}
+		else
+		{
+			OutError = TEXT("expects a string (asset path) or null");
+			return false;
+		}
+
+		void* Ptr = SoftObjProp->ContainerPtrToValuePtr<void>(Obj);
+		if (!Ptr)
+		{
+			return false;
+		}
+		*static_cast<FSoftObjectPtr*>(Ptr) = FSoftObjectPath(AssetPath);
+		UE_LOG(LogUALUtils, Log, TEXT("[SetSimpleProperty] Set soft object path to: %s"), *AssetPath);
+		return true;
+	}
+
+	// === FSoftClassProperty 支持（软类引用） ===
+	if (FSoftClassProperty* SoftClassProp = CastField<FSoftClassProperty>(Prop))
+	{
+		FString ClassPath;
+		if (Value->Type == EJson::String)
+		{
+			ClassPath = Value->AsString();
+		}
+		else
+		{
+			OutError = TEXT("expects a string (class path)");
+			return false;
+		}
+
+		void* Ptr = SoftClassProp->ContainerPtrToValuePtr<void>(Obj);
+		if (!Ptr)
+		{
+			return false;
+		}
+		*static_cast<FSoftObjectPtr*>(Ptr) = FSoftObjectPath(ClassPath);
+		return true;
+	}
+
+	// === FClassProperty 支持（UClass 引用） ===
+	if (FClassProperty* ClassProp = CastField<FClassProperty>(Prop))
+	{
+		FString ClassName;
+		if (Value->Type == EJson::String)
+		{
+			ClassName = Value->AsString();
+		}
+		else if (Value->Type == EJson::Null)
+		{
+			void* Ptr = ClassProp->ContainerPtrToValuePtr<void>(Obj);
+			if (Ptr)
+			{
+				ClassProp->SetPropertyValue(Ptr, nullptr);
+				return true;
+			}
+			return false;
+		}
+		else
+		{
+			OutError = TEXT("expects a string (class name/path)");
+			return false;
+		}
+
+		// 尝试查找类
+		UClass* FoundClass = FindObject<UClass>(ANY_PACKAGE, *ClassName);
+		if (!FoundClass)
+		{
+			FoundClass = LoadObject<UClass>(nullptr, *ClassName);
+		}
+		if (!FoundClass)
+		{
+			OutError = FString::Printf(TEXT("Class not found: %s"), *ClassName);
+			return false;
+		}
+
+		void* Ptr = ClassProp->ContainerPtrToValuePtr<void>(Obj);
+		if (!Ptr)
+		{
+			return false;
+		}
+		ClassProp->SetPropertyValue(Ptr, FoundClass);
+		return true;
 	}
 
 	OutError = FString::Printf(TEXT("unsupported property type: %s"), *Prop->GetClass()->GetName());

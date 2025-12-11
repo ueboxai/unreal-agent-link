@@ -3,9 +3,11 @@
 #include "CoreMinimal.h"
 #include "Dom/JsonObject.h"
 
+class UBlueprint;
+
 /**
  * 蓝图命令处理器
- * 包含: blueprint.create, blueprint.add_component, blueprint.set_property
+ * 包含: blueprint.describe, blueprint.create, blueprint.add_component, blueprint.set_property, blueprint.compile
  * 
  * 对应文档: 蓝图开发接口文档.md
  */
@@ -18,7 +20,13 @@ public:
 	 */
 	static void RegisterCommands(TMap<FString, TFunction<void(const TSharedPtr<FJsonObject>&, const FString)>>& CommandMap);
 
-	// Public Handlers called by Dispatcher
+	// ============================================================================
+	// 命令处理函数
+	// ============================================================================
+	
+	// blueprint.describe - 获取蓝图完整结构信息（组件、变量等）
+	static void Handle_DescribeBlueprint(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	
 	// blueprint.create - 创建蓝图
 	static void Handle_CreateBlueprint(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 	
@@ -27,4 +35,42 @@ public:
 	
 	// blueprint.set_property - 设置蓝图属性（支持 CDO 和 SCS 组件）
 	static void Handle_SetBlueprintProperty(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
+	// blueprint.compile - 编译蓝图并可选保存
+	static void Handle_CompileBlueprint(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
+	// ============================================================================
+	// 辅助函数
+	// ============================================================================
+	
+	/**
+	 * 构建蓝图结构 JSON 对象
+	 * 包含：基本信息、所有组件（SCS + 继承）、变量列表、编译状态
+	 * 被 describe、create、add_component 复用
+	 * 
+	 * @param Blueprint 蓝图对象
+	 * @param bIncludeVariables 是否包含变量列表（默认 true）
+	 * @param bIncludeComponentDetails 是否包含组件详细属性（默认 false，仅返回基本信息）
+	 * @return JSON 对象
+	 */
+	static TSharedPtr<FJsonObject> BuildBlueprintStructureJson(
+		UBlueprint* Blueprint, 
+		bool bIncludeVariables = true, 
+		bool bIncludeComponentDetails = false
+	);
+
+private:
+	/**
+	 * 收集蓝图的所有组件信息（包括 SCS 添加的和继承的）
+	 * @param Blueprint 蓝图对象
+	 * @return 组件信息数组
+	 */
+	static TArray<TSharedPtr<FJsonValue>> CollectComponentsInfo(UBlueprint* Blueprint);
+	
+	/**
+	 * 收集蓝图的变量列表
+	 * @param Blueprint 蓝图对象
+	 * @return 变量信息数组
+	 */
+	static TArray<TSharedPtr<FJsonValue>> CollectVariablesInfo(UBlueprint* Blueprint);
 };

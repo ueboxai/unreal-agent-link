@@ -7,11 +7,12 @@
  * 内容浏览器命令处理器
  * 管理 UE 编辑器内的文件与文件夹结构
  * 
- * 包含 4 个原子工具（CRUD 操作）:
- * - content.search  : 搜索资产路径、类名
- * - content.import  : 导入外部文件 (FBX/PNG/WAV 等)
- * - content.move    : 移动/重命名资产
- * - content.delete  : 删除资产/文件夹
+ * 包含 5 个原子工具（CRUD + Describe）:
+ * - content.search   : 搜索资产路径、类名
+ * - content.import   : 导入外部文件 (FBX/PNG/WAV 等)
+ * - content.move     : 移动/重命名资产
+ * - content.delete   : 删除资产/文件夹
+ * - content.describe : 获取资产详情（含依赖和被引用关系）
  * 
  * 对应文档: 内容管理文档.md
  */
@@ -63,4 +64,13 @@ public:
 	 * @param RequestId 请求 ID
 	 */
 	static void Handle_DeleteAssets(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	
+	/**
+	 * content.describe - 获取资产详情
+	 * 返回资产的完整信息，包括依赖项和被引用项
+	 * 
+	 * @param Payload 请求参数 (path, include_dependencies, include_referencers)
+	 * @param RequestId 请求 ID
+	 */
+	static void Handle_DescribeAsset(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 };

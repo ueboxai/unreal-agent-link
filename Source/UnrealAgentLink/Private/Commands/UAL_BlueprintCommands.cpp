@@ -17,6 +17,12 @@ DEFINE_LOG_CATEGORY_STATIC(LogUALBlueprint, Log, All);
 
 void FUAL_BlueprintCommands::RegisterCommands(TMap<FString, TFunction<void(const TSharedPtr<FJsonObject>&, const FString)>>& CommandMap)
 {
+	// blueprint.describe - 获取蓝图完整结构信息
+	CommandMap.Add(TEXT("blueprint.describe"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_DescribeBlueprint(Payload, RequestId);
+	});
+	
 	CommandMap.Add(TEXT("blueprint.create"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
 	{
 		Handle_CreateBlueprint(Payload, RequestId);
@@ -30,6 +36,11 @@ void FUAL_BlueprintCommands::RegisterCommands(TMap<FString, TFunction<void(const
 	CommandMap.Add(TEXT("blueprint.set_property"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
 	{
 		Handle_SetBlueprintProperty(Payload, RequestId);
+	});
+
+	CommandMap.Add(TEXT("blueprint.compile"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_CompileBlueprint(Payload, RequestId);
 	});
 }
 
@@ -273,27 +284,9 @@ void FUAL_BlueprintCommands::Handle_CreateBlueprint(const TSharedPtr<FJsonObject
 	// Asset Registry
 	FAssetRegistryModule::AssetCreated(Blueprint);
 
-	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
-	Result->SetBoolField(TEXT("ok"), true);
-	Result->SetStringField(TEXT("name"), BlueprintName);
-	Result->SetStringField(TEXT("path"), PackageName);
-	Result->SetStringField(TEXT("parent_class"), ParentClass->GetName());
-	Result->SetStringField(TEXT("generated_class"), Blueprint->GeneratedClass ? Blueprint->GeneratedClass->GetPathName() : TEXT(""));
+	// 使用统一的结构构建函数，返回完整蓝图信息
+	TSharedPtr<FJsonObject> Result = BuildBlueprintStructureJson(Blueprint, true, false);
 	Result->SetBoolField(TEXT("saved"), true);
-
-	TArray<TSharedPtr<FJsonValue>> CompResults;
-	if (Blueprint->SimpleConstructionScript)
-	{
-		for (USCS_Node* Node : Blueprint->SimpleConstructionScript->GetAllNodes())
-		{
-			TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
-			NodeObj->SetStringField(TEXT("name"), Node->GetVariableName().ToString());
-			NodeObj->SetStringField(TEXT("class"), Node->ComponentClass ? Node->ComponentClass->GetName() : TEXT("Unknown"));
-			NodeObj->SetStringField(TEXT("attach_to"), Node->ParentComponentOrVariableName.ToString());
-			CompResults.Add(MakeShared<FJsonValueObject>(NodeObj));
-		}
-	}
-	Result->SetArrayField(TEXT("components"), CompResults);
 	Result->SetArrayField(TEXT("warnings"), TArray<TSharedPtr<FJsonValue>>()); // Placeholder
 
 	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
@@ -550,6 +543,9 @@ void FUAL_BlueprintCommands::Handle_AddComponentToBlueprint(const TSharedPtr<FJs
 	Result->SetBoolField(TEXT("saved"), bSaved);
 	Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Successfully added component '%s' (%s) to blueprint '%s'"), 
 		*ComponentName, *ComponentClass->GetName(), *Blueprint->GetName()));
+	
+	// 返回更新后的完整组件列表，让 AI 知道当前蓝图有哪些组件
+	Result->SetArrayField(TEXT("all_components"), CollectComponentsInfo(Blueprint));
 
 	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
 }
@@ -843,4 +839,363 @@ void FUAL_BlueprintCommands::Handle_SetBlueprintProperty(const TSharedPtr<FJsonO
 
 	int32 Code = (FailedPropsArray.Num() == 0) ? 200 : (ModifiedPropsArray.Num() > 0 ? 207 : 400);
 	UAL_CommandUtils::SendResponse(RequestId, Code, Result);
+}
+
+/**
+ * 编译蓝图并可选保存
+ *
+ * 请求参数:
+ *   - blueprint_path: 蓝图路径（必填）
+ *   - save: 编译成功后是否保存（可选，默认 true）
+ *
+ * 响应:
+ *   - ok: 是否编译成功（状态为 UpToDate）
+ *   - status: 编译状态 (UpToDate / Dirty / Error / Unknown / Other)
+ *   - saved: 是否已保存
+ *   - path: 蓝图路径
+ */
+void FUAL_BlueprintCommands::Handle_CompileBlueprint(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+	// 1. 解析参数
+	FString BlueprintPath;
+	if (!Payload->TryGetStringField(TEXT("blueprint_path"), BlueprintPath) || BlueprintPath.IsEmpty())
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing blueprint_path"));
+		return;
+	}
+
+	bool bSave = true;
+	Payload->TryGetBoolField(TEXT("save"), bSave);
+
+	// 2. 加载蓝图
+	UBlueprint* Blueprint = nullptr;
+	FString ResolvedPath = BlueprintPath;
+
+	if (BlueprintPath.StartsWith(TEXT("/")))
+	{
+		if (!BlueprintPath.Contains(TEXT(".")))
+		{
+			ResolvedPath = BlueprintPath + TEXT(".") + FPaths::GetBaseFilename(BlueprintPath);
+		}
+		Blueprint = LoadObject<UBlueprint>(nullptr, *ResolvedPath);
+	}
+
+	// 如果直接加载失败，通过 AssetRegistry 查找
+	if (!Blueprint)
+	{
+		IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
+
+		TArray<FAssetData> AssetList;
+		FARFilter Filter;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+		Filter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
+#else
+		Filter.ClassNames.Add(UBlueprint::StaticClass()->GetFName());
+#endif
+		Filter.bRecursiveClasses = true;
+		AssetRegistry.GetAssets(Filter, AssetList);
+
+		for (const FAssetData& Asset : AssetList)
+		{
+			FString AssetName = Asset.AssetName.ToString();
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+			FString AssetPath = Asset.GetObjectPathString();
+#else
+			FString AssetPath = Asset.ObjectPath.ToString();
+#endif
+			if (AssetName.Equals(BlueprintPath, ESearchCase::IgnoreCase) ||
+				AssetPath.Contains(BlueprintPath))
+			{
+				Blueprint = Cast<UBlueprint>(Asset.GetAsset());
+				ResolvedPath = AssetPath;
+				break;
+			}
+		}
+	}
+
+	if (!Blueprint)
+	{
+		UAL_CommandUtils::SendError(RequestId, 404, FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		return;
+	}
+
+	// 3. 执行编译
+	FKismetEditorUtilities::CompileBlueprint(Blueprint);
+
+	// 4. 检查结果状态
+	const bool bCompileSuccess = (Blueprint->Status == BS_UpToDate);
+
+	FString StatusStr;
+	switch (Blueprint->Status)
+	{
+	case BS_UpToDate: StatusStr = TEXT("UpToDate"); break;
+	case BS_Dirty:    StatusStr = TEXT("Dirty"); break;
+	case BS_Error:    StatusStr = TEXT("Error"); break;
+	case BS_Unknown:  StatusStr = TEXT("Unknown"); break;
+	default:          StatusStr = TEXT("Other"); break;
+	}
+
+	// 5. 保存（仅在请求要求且编译成功时执行，避免写入坏蓝图）
+	bool bSaved = false;
+	if (bSave && bCompileSuccess)
+	{
+		if (UPackage* Package = Blueprint->GetOutermost())
+		{
+			const FString PackageFileName = FPackageName::LongPackageNameToFilename(Package->GetName(), FPackageName::GetAssetPackageExtension());
+			FSavePackageArgs SaveArgs;
+			SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+			UPackage::SavePackage(Package, Blueprint, *PackageFileName, SaveArgs);
+			bSaved = true;
+		}
+	}
+
+	// 6. 返回结果
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("ok"), bCompileSuccess);
+	Result->SetStringField(TEXT("status"), StatusStr);
+	Result->SetBoolField(TEXT("saved"), bSaved);
+	Result->SetStringField(TEXT("path"), Blueprint->GetPathName());
+
+	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
+}
+
+// ============================================================================
+// 辅助函数实现
+// ============================================================================
+
+/**
+ * 收集蓝图的所有组件信息（包括 SCS 添加的和父类继承的）
+ */
+TArray<TSharedPtr<FJsonValue>> FUAL_BlueprintCommands::CollectComponentsInfo(UBlueprint* Blueprint)
+{
+	TArray<TSharedPtr<FJsonValue>> ComponentsArray;
+	if (!Blueprint) return ComponentsArray;
+
+	TSet<FString> AddedNames; // 避免重复
+
+	// 1. 收集 SCS 添加的组件
+	if (USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript)
+	{
+		for (USCS_Node* Node : SCS->GetAllNodes())
+		{
+			if (!Node) continue;
+			
+			TSharedPtr<FJsonObject> CompObj = MakeShared<FJsonObject>();
+			FString CompName = Node->GetVariableName().ToString();
+			
+			CompObj->SetStringField(TEXT("name"), CompName);
+			CompObj->SetStringField(TEXT("class"), Node->ComponentClass ? Node->ComponentClass->GetName() : TEXT("Unknown"));
+			CompObj->SetStringField(TEXT("class_path"), Node->ComponentClass ? Node->ComponentClass->GetPathName() : TEXT(""));
+			CompObj->SetStringField(TEXT("source"), TEXT("added")); // SCS 添加的
+			CompObj->SetBoolField(TEXT("editable"), true);
+			CompObj->SetStringField(TEXT("attach_to"), Node->ParentComponentOrVariableName.ToString());
+			
+			ComponentsArray.Add(MakeShared<FJsonValueObject>(CompObj));
+			AddedNames.Add(CompName);
+		}
+	}
+
+	// 2. 收集父类继承的组件（从 CDO 中获取）
+	if (Blueprint->GeneratedClass)
+	{
+		if (UObject* CDO = Blueprint->GeneratedClass->GetDefaultObject())
+		{
+			TArray<UObject*> SubObjects;
+			GetObjectsWithOuter(CDO, SubObjects, false);
+			
+			for (UObject* SubObj : SubObjects)
+			{
+				UActorComponent* Component = Cast<UActorComponent>(SubObj);
+				if (!Component) continue;
+				
+				FString CompName = Component->GetName();
+				if (AddedNames.Contains(CompName)) continue; // 跳过已添加的
+				
+				TSharedPtr<FJsonObject> CompObj = MakeShared<FJsonObject>();
+				CompObj->SetStringField(TEXT("name"), CompName);
+				CompObj->SetStringField(TEXT("class"), Component->GetClass()->GetName());
+				CompObj->SetStringField(TEXT("class_path"), Component->GetClass()->GetPathName());
+				CompObj->SetStringField(TEXT("source"), TEXT("inherited")); // 继承的
+				CompObj->SetBoolField(TEXT("editable"), true);
+				
+				ComponentsArray.Add(MakeShared<FJsonValueObject>(CompObj));
+				AddedNames.Add(CompName);
+			}
+		}
+	}
+
+	return ComponentsArray;
+}
+
+/**
+ * 收集蓝图的变量列表
+ */
+TArray<TSharedPtr<FJsonValue>> FUAL_BlueprintCommands::CollectVariablesInfo(UBlueprint* Blueprint)
+{
+	TArray<TSharedPtr<FJsonValue>> VariablesArray;
+	if (!Blueprint) return VariablesArray;
+
+	// 遍历 NewVariables（蓝图定义的变量）
+	for (const FBPVariableDescription& Var : Blueprint->NewVariables)
+	{
+		TSharedPtr<FJsonObject> VarObj = MakeShared<FJsonObject>();
+		VarObj->SetStringField(TEXT("name"), Var.VarName.ToString());
+		VarObj->SetStringField(TEXT("type"), Var.VarType.PinCategory.ToString());
+		VarObj->SetBoolField(TEXT("editable"), true);
+		
+		// 尝试获取默认值
+		if (!Var.DefaultValue.IsEmpty())
+		{
+			VarObj->SetStringField(TEXT("default_value"), Var.DefaultValue);
+		}
+		
+		VariablesArray.Add(MakeShared<FJsonValueObject>(VarObj));
+	}
+
+	return VariablesArray;
+}
+
+/**
+ * 构建蓝图结构 JSON 对象
+ * 被 describe、create、add_component 复用
+ */
+TSharedPtr<FJsonObject> FUAL_BlueprintCommands::BuildBlueprintStructureJson(
+	UBlueprint* Blueprint, 
+	bool bIncludeVariables, 
+	bool bIncludeComponentDetails)
+{
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	if (!Blueprint)
+	{
+		Result->SetBoolField(TEXT("ok"), false);
+		Result->SetStringField(TEXT("error"), TEXT("Invalid blueprint"));
+		return Result;
+	}
+
+	Result->SetBoolField(TEXT("ok"), true);
+	Result->SetStringField(TEXT("name"), Blueprint->GetName());
+	Result->SetStringField(TEXT("path"), Blueprint->GetPathName());
+	
+	// 父类信息
+	if (Blueprint->ParentClass)
+	{
+		Result->SetStringField(TEXT("parent_class"), Blueprint->ParentClass->GetName());
+		Result->SetStringField(TEXT("parent_class_path"), Blueprint->ParentClass->GetPathName());
+	}
+	
+	// 生成的类
+	if (Blueprint->GeneratedClass)
+	{
+		Result->SetStringField(TEXT("generated_class"), Blueprint->GeneratedClass->GetPathName());
+	}
+
+	// 组件列表
+	Result->SetArrayField(TEXT("components"), CollectComponentsInfo(Blueprint));
+	
+	// 变量列表（可选）
+	if (bIncludeVariables)
+	{
+		Result->SetArrayField(TEXT("variables"), CollectVariablesInfo(Blueprint));
+	}
+	
+	// 编译状态
+	FString StatusStr;
+	switch (Blueprint->Status)
+	{
+	case BS_UpToDate: StatusStr = TEXT("UpToDate"); break;
+	case BS_Dirty:    StatusStr = TEXT("Dirty"); break;
+	case BS_Error:    StatusStr = TEXT("Error"); break;
+	case BS_Unknown:  StatusStr = TEXT("Unknown"); break;
+	default:          StatusStr = TEXT("Other"); break;
+	}
+	Result->SetStringField(TEXT("compile_status"), StatusStr);
+
+	return Result;
+}
+
+// ============================================================================
+// blueprint.describe 命令处理
+// ============================================================================
+
+/**
+ * 获取蓝图完整结构信息
+ *
+ * 请求参数:
+ *   - blueprint_path: 蓝图路径（必填）
+ *
+ * 响应:
+ *   - ok: 是否成功
+ *   - name: 蓝图名称
+ *   - path: 蓝图完整路径
+ *   - parent_class: 父类名称
+ *   - parent_class_path: 父类完整路径
+ *   - components: 组件列表（包含名称、类型、来源等）
+ *   - variables: 变量列表（包含名称、类型、默认值等）
+ *   - compile_status: 编译状态
+ */
+void FUAL_BlueprintCommands::Handle_DescribeBlueprint(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+	// 1. 解析参数
+	FString BlueprintPath;
+	if (!Payload->TryGetStringField(TEXT("blueprint_path"), BlueprintPath) || BlueprintPath.IsEmpty())
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required field: blueprint_path"));
+		return;
+	}
+
+	// 2. 加载蓝图
+	UBlueprint* Blueprint = nullptr;
+	FString ResolvedPath = BlueprintPath;
+
+	if (BlueprintPath.StartsWith(TEXT("/")))
+	{
+		if (!BlueprintPath.Contains(TEXT(".")))
+		{
+			ResolvedPath = BlueprintPath + TEXT(".") + FPaths::GetBaseFilename(BlueprintPath);
+		}
+		Blueprint = LoadObject<UBlueprint>(nullptr, *ResolvedPath);
+	}
+
+	// 如果直接加载失败，通过 AssetRegistry 查找
+	if (!Blueprint)
+	{
+		IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
+
+		TArray<FAssetData> AssetList;
+		FARFilter Filter;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+		Filter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
+#else
+		Filter.ClassNames.Add(UBlueprint::StaticClass()->GetFName());
+#endif
+		Filter.bRecursiveClasses = true;
+		AssetRegistry.GetAssets(Filter, AssetList);
+
+		for (const FAssetData& Asset : AssetList)
+		{
+			FString AssetName = Asset.AssetName.ToString();
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+			FString AssetPath = Asset.GetObjectPathString();
+#else
+			FString AssetPath = Asset.ObjectPath.ToString();
+#endif
+			if (AssetName.Equals(BlueprintPath, ESearchCase::IgnoreCase) ||
+				AssetPath.Contains(BlueprintPath))
+			{
+				Blueprint = Cast<UBlueprint>(Asset.GetAsset());
+				ResolvedPath = AssetPath;
+				break;
+			}
+		}
+	}
+
+	if (!Blueprint)
+	{
+		UAL_CommandUtils::SendError(RequestId, 404, FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		return;
+	}
+
+	// 3. 构建并返回结构信息
+	TSharedPtr<FJsonObject> Result = BuildBlueprintStructureJson(Blueprint, true, false);
+	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
 }

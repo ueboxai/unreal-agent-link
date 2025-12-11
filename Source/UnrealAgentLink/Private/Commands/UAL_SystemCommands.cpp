@@ -4,6 +4,8 @@
 #include "IPythonScriptPlugin.h"
 #include "Editor.h"
 #include "Engine/World.h"
+#include "Interfaces/IPluginManager.h"
+#include "Interfaces/IProjectManager.h"
 #include "Misc/App.h"
 #include "EngineStats.h"
 
@@ -46,6 +48,11 @@ void FUAL_SystemCommands::RegisterCommands(TMap<FString, TFunction<void(const TS
 	CommandMap.Add(TEXT("system.get_performance_stats"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
 	{
 		Handle_GetPerformanceStats(Payload, RequestId);
+	});
+
+	CommandMap.Add(TEXT("system.manage_plugin"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_ManagePlugin(Payload, RequestId);
 	});
 }
 
@@ -143,4 +150,95 @@ void FUAL_SystemCommands::Handle_GetPerformanceStats(const TSharedPtr<FJsonObjec
 	Data->SetNumberField(TEXT("gpu_ms"), GPUMs);
 
 	UAL_CommandUtils::SendResponse(RequestId, 200, Data);
+}
+
+void FUAL_SystemCommands::Handle_ManagePlugin(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+	FString PluginName;
+	if (!Payload->TryGetStringField(TEXT("plugin_name"), PluginName) || PluginName.IsEmpty())
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing field: plugin_name"));
+		return;
+	}
+
+	FString ActionString;
+	const bool bHasAction = Payload->TryGetStringField(TEXT("action"), ActionString);
+	const FString NormalizedAction = bHasAction ? ActionString.ToLower() : TEXT("query");
+
+	IPluginManager& PluginManager = IPluginManager::Get();
+	const TSharedPtr<IPlugin> Plugin = PluginManager.FindPlugin(PluginName);
+	if (!Plugin.IsValid())
+	{
+		UAL_CommandUtils::SendError(RequestId, 404, FString::Printf(TEXT("Plugin '%s' not found"), *PluginName));
+		return;
+	}
+
+	bool bSuccess = true;
+	bool bRequiresRestart = false;
+	FString Message;
+
+	const bool bCurrentlyEnabled = Plugin->IsEnabled();
+
+	auto SetPluginEnabled = [&PluginName](bool bEnable) -> bool
+	{
+		// 统一使用 ProjectManager 设置，它会自动处理 .uproject 文件更新
+		FText FailReason;
+		return IProjectManager::Get().SetPluginEnabled(PluginName, bEnable, FailReason);
+	};
+
+	if (NormalizedAction == TEXT("enable"))
+	{
+		if (!bCurrentlyEnabled)
+		{
+			if (SetPluginEnabled(true))
+			{
+				bRequiresRestart = true;
+				Message = TEXT("Plugin enabled. Restart required.");
+			}
+			else
+			{
+				bSuccess = false;
+				Message = TEXT("Failed to enable plugin.");
+			}
+		}
+	}
+	else if (NormalizedAction == TEXT("disable"))
+	{
+		if (bCurrentlyEnabled)
+		{
+			if (SetPluginEnabled(false))
+			{
+				bRequiresRestart = true;
+				Message = TEXT("Plugin disabled. Restart required.");
+			}
+			else
+			{
+				bSuccess = false;
+				Message = TEXT("Failed to disable plugin.");
+			}
+		}
+	}
+	else if (NormalizedAction == TEXT("query"))
+	{
+		// no-op
+	}
+	else
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, FString::Printf(TEXT("Unsupported action: %s"), *ActionString));
+		return;
+	}
+
+	const bool bIsEnabled = Plugin->IsEnabled();
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("plugin_name"), Plugin->GetName());
+	Result->SetBoolField(TEXT("is_enabled"), bIsEnabled);
+	Result->SetBoolField(TEXT("requires_restart"), bRequiresRestart);
+	Result->SetStringField(TEXT("friendly_name"), Plugin->GetDescriptor().FriendlyName);
+	if (!Message.IsEmpty())
+	{
+		Result->SetStringField(TEXT("message"), Message);
+	}
+
+	UAL_CommandUtils::SendResponse(RequestId, bSuccess ? 200 : 500, Result);
 }

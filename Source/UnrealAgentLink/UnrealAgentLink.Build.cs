@@ -63,6 +63,7 @@ public class UnrealAgentLink : ModuleRules
 				"SlateCore",
 				"RenderCore",
 				"RHI",
+				"GameProjectGeneration",
 			}
 			);
 

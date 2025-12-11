@@ -1,5 +1,6 @@
 #include "UAL_ContentBrowserCommands.h"
 #include "UAL_CommandUtils.h"
+#include "Utils/UAL_PBRMaterialHelper.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
@@ -10,6 +11,12 @@
 #include "FileHelpers.h"
 #include "Misc/Paths.h"
 #include "HAL/FileManager.h"
+#include "AssetImportTask.h"
+#include "Factories/FbxImportUI.h"
+#include "Engine/StaticMesh.h"
+#include "Engine/Texture2D.h"
+#include "UObject/SavePackage.h"
+#include "Misc/PackageName.h"
 
 // 使用独立的 Log Category 名称，避免与 UAL_ContentBrowserExt 冲突
 DEFINE_LOG_CATEGORY_STATIC(LogUALContentCmd, Log, All);
@@ -24,8 +31,9 @@ void FUAL_ContentBrowserCommands::RegisterCommands(
 	CommandMap.Add(TEXT("content.import"), &Handle_ImportAssets);
 	CommandMap.Add(TEXT("content.move"), &Handle_MoveAsset);
 	CommandMap.Add(TEXT("content.delete"), &Handle_DeleteAssets);
+	CommandMap.Add(TEXT("content.describe"), &Handle_DescribeAsset);
 	
-	UE_LOG(LogUALContentCmd, Log, TEXT("ContentBrowser commands registered: content.search, content.import, content.move, content.delete"));
+	UE_LOG(LogUALContentCmd, Log, TEXT("ContentBrowser commands registered: content.search, content.import, content.move, content.delete, content.describe"));
 }
 
 // ============================================================================
@@ -123,6 +131,7 @@ void FUAL_ContentBrowserCommands::Handle_SearchAssets(
 /**
  * content.import - 导入外部文件
  * 将磁盘上的文件导入到 UE 项目中
+ * 使用 UAssetImportTask 实现无弹窗自动化导入（类似 Quixel Bridge）
  */
 void FUAL_ContentBrowserCommands::Handle_ImportAssets(
 	const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
@@ -146,26 +155,59 @@ void FUAL_ContentBrowserCommands::Handle_ImportAssets(
 	UE_LOG(LogUALContentCmd, Log, TEXT("content.import: %d files -> %s, overwrite=%d"),
 		FilesArray->Num(), *DestinationPath, bOverwrite);
 	
-	// 收集文件路径
-	TArray<FString> FilesToImport;
+	// 收集文件路径并创建导入任务
+	TArray<UAssetImportTask*> ImportTasks;
 	for (const TSharedPtr<FJsonValue>& FileValue : *FilesArray)
 	{
 		FString FilePath;
 		if (FileValue->TryGetString(FilePath) && !FilePath.IsEmpty())
 		{
 			// 验证文件存在
-			if (FPaths::FileExists(FilePath))
-			{
-				FilesToImport.Add(FilePath);
-			}
-			else
+			if (!FPaths::FileExists(FilePath))
 			{
 				UE_LOG(LogUALContentCmd, Warning, TEXT("File not found: %s"), *FilePath);
+				continue;
 			}
+			
+			// 创建导入任务
+			UAssetImportTask* Task = NewObject<UAssetImportTask>();
+			Task->Filename = FilePath;
+			Task->DestinationPath = DestinationPath;
+			
+			// 关键设置：禁用所有UI，实现无弹窗导入
+			Task->bAutomated = true;
+			// 不自动保存，避免触发源码管理检出对话框
+			// 资产将保持未保存状态，用户可稍后手动保存
+			Task->bSave = false;
+			Task->bReplaceExisting = bOverwrite;
+			
+			// 获取文件扩展名
+			FString Extension = FPaths::GetExtension(FilePath).ToLower();
+			
+			// 为 FBX 文件配置自动导入选项
+			if (Extension == TEXT("fbx"))
+			{
+				UFbxImportUI* ImportUI = NewObject<UFbxImportUI>();
+				
+				// 禁用自动检测，明确指定为静态网格体
+				ImportUI->bAutomatedImportShouldDetectType = false;
+				ImportUI->MeshTypeToImport = FBXIT_StaticMesh;
+				
+				// 自动导入材质和纹理
+				ImportUI->bImportMaterials = true;
+				ImportUI->bImportTextures = true;
+				
+				// 应用到任务
+				Task->Options = ImportUI;
+				
+				UE_LOG(LogUALContentCmd, Log, TEXT("Configured FBX import for: %s"), *FilePath);
+			}
+			
+			ImportTasks.Add(Task);
 		}
 	}
 	
-	if (FilesToImport.Num() == 0)
+	if (ImportTasks.Num() == 0)
 	{
 		UAL_CommandUtils::SendError(RequestId, 400, TEXT("No valid files to import"));
 		return;
@@ -175,28 +217,102 @@ void FUAL_ContentBrowserCommands::Handle_ImportAssets(
 	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
 	IAssetTools& AssetTools = AssetToolsModule.Get();
 	
-	// 执行导入
-	TArray<UObject*> ImportedAssets = AssetTools.ImportAssets(FilesToImport, DestinationPath);
+	// 执行批量导入任务（无弹窗）
+	UE_LOG(LogUALContentCmd, Log, TEXT("Executing %d automated import tasks..."), ImportTasks.Num());
+	AssetTools.ImportAssetTasks(ImportTasks);
 	
-	// 构建结果
+	// 收集导入结果
 	TArray<TSharedPtr<FJsonValue>> ImportedResults;
-	for (UObject* Asset : ImportedAssets)
+	TArray<UTexture2D*> ImportedTextures;
+	TArray<UStaticMesh*> ImportedMeshes;
+	int32 SuccessCount = 0;
+	
+	for (UAssetImportTask* Task : ImportTasks)
 	{
-		if (Asset)
+		// 检查任务是否成功（通过ImportedObjectPaths检查）
+		if (Task->ImportedObjectPaths.Num() > 0)
 		{
-			TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
-			Item->SetStringField(TEXT("name"), Asset->GetName());
-			Item->SetStringField(TEXT("path"), Asset->GetPathName());
-			Item->SetStringField(TEXT("class"), Asset->GetClass()->GetName());
-			ImportedResults.Add(MakeShared<FJsonValueObject>(Item));
+			for (const FString& ObjectPath : Task->ImportedObjectPaths)
+			{
+				// 加载导入的资产
+				UObject* ImportedAsset = LoadObject<UObject>(nullptr, *ObjectPath);
+				if (ImportedAsset)
+				{
+					TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+					Item->SetStringField(TEXT("name"), ImportedAsset->GetName());
+					Item->SetStringField(TEXT("path"), ImportedAsset->GetPathName());
+					Item->SetStringField(TEXT("class"), ImportedAsset->GetClass()->GetName());
+					ImportedResults.Add(MakeShared<FJsonValueObject>(Item));
+					SuccessCount++;
+					
+					// 🎨 收集纹理和网格体，用于PBR材质生成
+					if (UTexture2D* Texture = Cast<UTexture2D>(ImportedAsset))
+					{
+						ImportedTextures.Add(Texture);
+					}
+					else if (UStaticMesh* Mesh = Cast<UStaticMesh>(ImportedAsset))
+					{
+						ImportedMeshes.Add(Mesh);
+					}
+				}
+			}
+		}
+		else
+		{
+			UE_LOG(LogUALContentCmd, Warning, TEXT("No assets imported from: %s"), *Task->Filename);
+		}
+	}
+	
+	// 🚀 自动生成PBR材质（如果导入了纹理）
+	TArray<UMaterialInstanceConstant*> CreatedMaterials;
+	if (ImportedTextures.Num() > 0)
+	{
+		UE_LOG(LogUALContentCmd, Log, 
+			TEXT("Starting automatic PBR material generation for %d textures..."), 
+			ImportedTextures.Num());
+		
+		// 配置PBR处理选项
+		FUAL_PBRMaterialOptions PBROptions;
+		PBROptions.bApplyToMesh = true;           // 自动应用到网格体
+		PBROptions.bUseStandardNaming = true;     // 使用标准命名（MI_前缀）
+		PBROptions.bAutoConfigureTextures = true;  // 自动配置纹理设置
+		
+		// 批量处理PBR资产
+		int32 MaterialCount = FUAL_PBRMaterialHelper::BatchProcessPBRAssets(
+			ImportedTextures,
+			ImportedMeshes,
+			DestinationPath,
+			PBROptions,
+			CreatedMaterials);
+		
+		if (MaterialCount > 0)
+		{
+			UE_LOG(LogUALContentCmd, Log, 
+				TEXT("✨ Successfully created %d PBR material(s) automatically!"), 
+				MaterialCount);
+			
+			// 将创建的材质也添加到返回结果中
+			for (UMaterialInstanceConstant* Material : CreatedMaterials)
+			{
+				if (Material)
+				{
+					TSharedPtr<FJsonObject> MatItem = MakeShared<FJsonObject>();
+					MatItem->SetStringField(TEXT("name"), Material->GetName());
+					MatItem->SetStringField(TEXT("path"), Material->GetPathName());
+					MatItem->SetStringField(TEXT("class"), TEXT("MaterialInstanceConstant"));
+					MatItem->SetBoolField(TEXT("auto_generated"), true);
+					ImportedResults.Add(MakeShared<FJsonValueObject>(MatItem));
+					SuccessCount++;
+				}
+			}
 		}
 	}
 	
 	// 返回结果
 	TSharedPtr<FJsonObject> Response = MakeShared<FJsonObject>();
-	Response->SetBoolField(TEXT("ok"), ImportedResults.Num() > 0);
-	Response->SetNumberField(TEXT("imported_count"), ImportedResults.Num());
-	Response->SetNumberField(TEXT("requested_count"), FilesToImport.Num());
+	Response->SetBoolField(TEXT("ok"), SuccessCount > 0);
+	Response->SetNumberField(TEXT("imported_count"), SuccessCount);
+	Response->SetNumberField(TEXT("requested_count"), ImportTasks.Num());
 	Response->SetArrayField(TEXT("imported"), ImportedResults);
 	
 	UAL_CommandUtils::SendResponse(RequestId, 200, Response);
@@ -224,7 +340,11 @@ void FUAL_ContentBrowserCommands::Handle_MoveAsset(
 		return;
 	}
 	
-	UE_LOG(LogUALContentCmd, Log, TEXT("content.move: %s -> %s"), *SourcePath, *DestinationPath);
+	bool bAutoRename = false;
+	Payload->TryGetBoolField(TEXT("auto_rename"), bAutoRename);
+
+	UE_LOG(LogUALContentCmd, Log, TEXT("content.move: %s -> %s, auto_rename=%d"), 
+		*SourcePath, *DestinationPath, bAutoRename);
 	
 	// 加载源资产 - 支持 PackageName 和 ObjectPath 两种格式
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
@@ -290,8 +410,60 @@ void FUAL_ContentBrowserCommands::Handle_MoveAsset(
 		return;
 	}
 	
+	// 检查目标是否存在，处理自动重命名
+	FString FinalDestAssetName = DestAssetName;
+	bool bRenamed = false;
+	
+	auto CheckAssetExists = [&](const FString& PackagePath, const FString& AssetName) -> bool {
+		FString FullPath = PackagePath / AssetName + TEXT(".") + AssetName;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+		FAssetData ExistingAsset = AssetRegistry.GetAssetByObjectPath(FSoftObjectPath(FullPath));
+		if (!ExistingAsset.IsValid())
+		{
+			ExistingAsset = AssetRegistry.GetAssetByObjectPath(FSoftObjectPath(PackagePath / AssetName));
+		}
+#else
+		FAssetData ExistingAsset = AssetRegistry.GetAssetByObjectPath(FName(*FullPath));
+		if (!ExistingAsset.IsValid())
+		{
+			ExistingAsset = AssetRegistry.GetAssetByObjectPath(FName(*(PackagePath / AssetName)));
+		}
+#endif
+		// 还要检查是否只是包存在但没有资产
+		if (!ExistingAsset.IsValid())
+		{
+			TArray<FAssetData> PkgAssets;
+			AssetRegistry.GetAssetsByPackageName(FName(*(PackagePath / AssetName)), PkgAssets);
+			return PkgAssets.Num() > 0;
+		}
+		
+		return ExistingAsset.IsValid();
+	};
+	
+	if (CheckAssetExists(DestPackagePath, FinalDestAssetName))
+	{
+		if (bAutoRename)
+		{
+			int32 Suffix = 1;
+			FString BaseName = DestAssetName;
+			while (CheckAssetExists(DestPackagePath, FinalDestAssetName))
+			{
+				FinalDestAssetName = FString::Printf(TEXT("%s_%d"), *BaseName, Suffix++);
+				if (Suffix > 1000) break;
+			}
+			bRenamed = true;
+			UE_LOG(LogUALContentCmd, Log, TEXT("Auto-renamed collision: %s -> %s"), *DestAssetName, *FinalDestAssetName);
+		}
+		else
+		{
+			UAL_CommandUtils::SendError(RequestId, 409, 
+				FString::Printf(TEXT("Asset already exists at destination: %s/%s"), *DestPackagePath, *DestAssetName));
+			return;
+		}
+	}
+	
 	UE_LOG(LogUALContentCmd, Log, TEXT("Move asset: %s -> %s/%s"), 
-		*SourcePath, *DestPackagePath, *DestAssetName);
+		*SourcePath, *DestPackagePath, *FinalDestAssetName);
 	
 	// 加载源资产对象
 	UObject* SourceObject = SourceAsset.GetAsset();
@@ -305,34 +477,39 @@ void FUAL_ContentBrowserCommands::Handle_MoveAsset(
 		*SourceObject->GetPathName(), *SourceObject->GetClass()->GetName());
 	
 	// 构建完整的新路径
-	FString NewPackageName = DestPackagePath / DestAssetName;
+	FString NewPackageName = DestPackagePath / FinalDestAssetName;
 	
 	UE_LOG(LogUALContentCmd, Log, TEXT("New package path: %s, New asset name: %s, Full new path: %s"), 
-		*DestPackagePath, *DestAssetName, *NewPackageName);
+		*DestPackagePath, *FinalDestAssetName, *NewPackageName);
 	
 	// 构建重命名数据
 	TArray<FAssetRenameData> RenameData;
+	
+	// 确保资产在内存中被正确标记
+	SourceObject->MarkPackageDirty();
+	
 #if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
-	RenameData.Add(FAssetRenameData(SourceAsset.ToSoftObjectPath(), DestPackagePath, DestAssetName));
+	// UE 5.1+ 使用 SoftObjectPath 构造
+	RenameData.Add(FAssetRenameData(SourceAsset.ToSoftObjectPath(), DestPackagePath, FinalDestAssetName));
 	UE_LOG(LogUALContentCmd, Log, TEXT("Using UE 5.1+ FAssetRenameData constructor with SoftObjectPath"));
 #else
-	FAssetRenameData RenameItem;
-	RenameItem.Asset = SourceObject;
-	RenameItem.NewPackagePath = DestPackagePath;
-	RenameItem.NewName = DestAssetName;
+	// UE 5.0: 使用 TWeakObjectPtr 正确初始化
+	// 关键：使用 FAssetRenameData(UObject*, FString, FString) 构造函数
+	FAssetRenameData RenameItem(SourceObject, DestPackagePath, FinalDestAssetName);
 	RenameData.Add(RenameItem);
-	UE_LOG(LogUALContentCmd, Log, TEXT("Using UE 5.0 FAssetRenameData with Asset pointer"));
+	UE_LOG(LogUALContentCmd, Log, TEXT("Using UE 5.0 FAssetRenameData with direct constructor: Object=%s, NewPath=%s, NewName=%s"), 
+		*SourceObject->GetPathName(), *DestPackagePath, *FinalDestAssetName);
 #endif
 	
 	// 执行移动/重命名
 	bool bSuccess = AssetTools.RenameAssets(RenameData);
 	
 	// 验证移动是否真正成功（检查目标位置是否存在资产）
-	FString NewAssetPath = DestPackagePath / DestAssetName;
+	FString NewAssetPath = DestPackagePath / FinalDestAssetName;
 #if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
-	FAssetData NewAssetData = AssetRegistry.GetAssetByObjectPath(FSoftObjectPath(NewAssetPath + TEXT(".") + DestAssetName));
+	FAssetData NewAssetData = AssetRegistry.GetAssetByObjectPath(FSoftObjectPath(NewAssetPath + TEXT(".") + FinalDestAssetName));
 #else
-	FAssetData NewAssetData = AssetRegistry.GetAssetByObjectPath(FName(*(NewAssetPath + TEXT(".") + DestAssetName)));
+	FAssetData NewAssetData = AssetRegistry.GetAssetByObjectPath(FName(*(NewAssetPath + TEXT(".") + FinalDestAssetName)));
 #endif
 	
 	// 如果标准路径找不到，尝试直接路径
@@ -347,19 +524,57 @@ void FUAL_ContentBrowserCommands::Handle_MoveAsset(
 	
 	bool bActuallyMoved = NewAssetData.IsValid();
 	
-	UE_LOG(LogUALContentCmd, Log, TEXT("RenameAssets returned: %s, Asset at new location: %s"), 
+	// 如果移动成功，保存新位置的资产包
+	bool bSaved = false;
+	if (bSuccess && bActuallyMoved)
+	{
+		UObject* MovedAsset = NewAssetData.GetAsset();
+		if (MovedAsset)
+		{
+			UPackage* Package = MovedAsset->GetOutermost();
+			if (Package)
+			{
+			FString PackageFileName = FPackageName::LongPackageNameToFilename(Package->GetName(), FPackageName::GetAssetPackageExtension());
+				FSavePackageArgs SaveArgs;
+				SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+				
+				// UE 5.1+ 返回 FSavePackageResultStruct，5.0 返回 bool
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+				FSavePackageResultStruct Result = UPackage::SavePackage(Package, MovedAsset, *PackageFileName, SaveArgs);
+				bSaved = Result.Result == ESavePackageResult::Success;
+#else
+				bSaved = UPackage::SavePackage(Package, MovedAsset, RF_Public | RF_Standalone, *PackageFileName);
+#endif
+				UE_LOG(LogUALContentCmd, Log, TEXT("Saved moved asset: %s (Success: %s)"), *PackageFileName, bSaved ? TEXT("true") : TEXT("false"));
+			}
+		}
+	}
+	
+	UE_LOG(LogUALContentCmd, Log, TEXT("RenameAssets returned: %s, Asset at new location: %s, Saved: %s"), 
 		bSuccess ? TEXT("true") : TEXT("false"),
-		bActuallyMoved ? TEXT("found") : TEXT("not found"));
+		bActuallyMoved ? TEXT("found") : TEXT("not found"),
+		bSaved ? TEXT("true") : TEXT("false"));
 	
 	// 返回结果
 	TSharedPtr<FJsonObject> Response = MakeShared<FJsonObject>();
 	Response->SetBoolField(TEXT("ok"), bSuccess && bActuallyMoved);
 	Response->SetStringField(TEXT("source_path"), SourcePath);
-	Response->SetStringField(TEXT("destination_path"), DestinationPath);
+	Response->SetStringField(TEXT("destination_path"), DestPackagePath / FinalDestAssetName);
+	
+	if (bRenamed)
+	{
+		Response->SetBoolField(TEXT("renamed"), true);
+		Response->SetStringField(TEXT("original_destination"), DestinationPath);
+	}
+	
+	Response->SetBoolField(TEXT("saved"), bSaved);
 	
 	if (bSuccess && bActuallyMoved)
 	{
-		Response->SetStringField(TEXT("message"), TEXT("Asset moved/renamed successfully"));
+		FString Msg = bRenamed 
+			? FString::Printf(TEXT("Asset moved and auto-renamed: %s -> %s"), *SourcePath, *FinalDestAssetName)
+			: TEXT("Asset moved/renamed successfully");
+		Response->SetStringField(TEXT("message"), Msg);
 	}
 	else if (bSuccess && !bActuallyMoved)
 	{
@@ -493,6 +708,220 @@ void FUAL_ContentBrowserCommands::Handle_DeleteAssets(
 		}
 		Response->SetArrayField(TEXT("failed"), FailedArray);
 	}
+	
+	UAL_CommandUtils::SendResponse(RequestId, 200, Response);
+}
+
+/**
+ * content.describe - 获取资产详情
+ * 返回资产的完整信息，包括依赖项和被引用项
+ * 
+ * 请求参数:
+ *   - path: 资产路径（必填）
+ *   - include_dependencies: 是否包含依赖项（可选，默认 true）
+ *   - include_referencers: 是否包含被引用项（可选，默认 true）
+ * 
+ * 响应:
+ *   - ok: 是否成功
+ *   - name: 资产名称
+ *   - path: 资产完整路径
+ *   - class: 资产类型
+ *   - package_size: 资产包大小（字节）
+ *   - dependencies: 依赖的资产列表
+ *   - referencers: 引用此资产的资产列表
+ */
+void FUAL_ContentBrowserCommands::Handle_DescribeAsset(
+	const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+	// 1. 解析参数
+	FString AssetPath;
+	if (!Payload->TryGetStringField(TEXT("path"), AssetPath) || AssetPath.IsEmpty())
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required parameter: path"));
+		return;
+	}
+	
+	bool bIncludeDependencies = true;
+	bool bIncludeReferencers = true;
+	Payload->TryGetBoolField(TEXT("include_dependencies"), bIncludeDependencies);
+	Payload->TryGetBoolField(TEXT("include_referencers"), bIncludeReferencers);
+	
+	UE_LOG(LogUALContentCmd, Log, TEXT("content.describe: path=%s, deps=%d, refs=%d"),
+		*AssetPath, bIncludeDependencies, bIncludeReferencers);
+	
+	// 2. 获取 Asset Registry
+	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+	
+	// 3. 查找资产
+	FAssetData AssetData;
+	
+	// 尝试1: 直接作为 ObjectPath
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+	AssetData = AssetRegistry.GetAssetByObjectPath(FSoftObjectPath(AssetPath));
+#else
+	AssetData = AssetRegistry.GetAssetByObjectPath(FName(*AssetPath));
+#endif
+	
+	// 尝试2: 构造完整 ObjectPath
+	if (!AssetData.IsValid())
+	{
+		FString AssetName = FPaths::GetBaseFilename(AssetPath);
+		FString FullObjectPath = AssetPath + TEXT(".") + AssetName;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+		AssetData = AssetRegistry.GetAssetByObjectPath(FSoftObjectPath(FullObjectPath));
+#else
+		AssetData = AssetRegistry.GetAssetByObjectPath(FName(*FullObjectPath));
+#endif
+	}
+	
+	// 尝试3: 通过 PackageName 查找
+	if (!AssetData.IsValid())
+	{
+		TArray<FAssetData> AssetList;
+		AssetRegistry.GetAssetsByPackageName(FName(*AssetPath), AssetList);
+		if (AssetList.Num() > 0)
+		{
+			AssetData = AssetList[0];
+		}
+	}
+	
+	if (!AssetData.IsValid())
+	{
+		UAL_CommandUtils::SendError(RequestId, 404, 
+			FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
+		return;
+	}
+	
+	// 4. 构建响应
+	TSharedPtr<FJsonObject> Response = MakeShared<FJsonObject>();
+	Response->SetBoolField(TEXT("ok"), true);
+	Response->SetStringField(TEXT("name"), AssetData.AssetName.ToString());
+	
+	// 获取完整路径
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+	Response->SetStringField(TEXT("path"), AssetData.GetObjectPathString());
+	Response->SetStringField(TEXT("class"), AssetData.AssetClassPath.GetAssetName().ToString());
+#else
+	Response->SetStringField(TEXT("path"), AssetData.ObjectPath.ToString());
+	Response->SetStringField(TEXT("class"), AssetData.AssetClass.ToString());
+#endif
+	
+	Response->SetStringField(TEXT("package"), AssetData.PackageName.ToString());
+	
+	// 5. 获取包大小（估算）
+	int64 PackageSize = 0;
+	FString PackageFileName;
+	if (FPackageName::DoesPackageExist(AssetData.PackageName.ToString(), &PackageFileName))
+	{
+		PackageSize = IFileManager::Get().FileSize(*PackageFileName);
+	}
+	Response->SetNumberField(TEXT("package_size_bytes"), (double)PackageSize);
+	
+	// 6. 获取依赖项
+	if (bIncludeDependencies)
+	{
+		TArray<TSharedPtr<FJsonValue>> DepsArray;
+		TArray<FName> Dependencies;
+		
+		AssetRegistry.GetDependencies(AssetData.PackageName, Dependencies);
+		
+		for (const FName& DepName : Dependencies)
+		{
+			FString DepPath = DepName.ToString();
+			// 过滤掉引擎内置资产和脚本
+			if (DepPath.StartsWith(TEXT("/Game/")) || DepPath.StartsWith(TEXT("/Content/")))
+			{
+				TSharedPtr<FJsonObject> DepObj = MakeShared<FJsonObject>();
+				DepObj->SetStringField(TEXT("path"), DepPath);
+				
+				// 尝试获取依赖资产的类型
+				TArray<FAssetData> DepAssets;
+				AssetRegistry.GetAssetsByPackageName(DepName, DepAssets);
+				if (DepAssets.Num() > 0)
+				{
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+					DepObj->SetStringField(TEXT("class"), DepAssets[0].AssetClassPath.GetAssetName().ToString());
+#else
+					DepObj->SetStringField(TEXT("class"), DepAssets[0].AssetClass.ToString());
+#endif
+					DepObj->SetStringField(TEXT("name"), DepAssets[0].AssetName.ToString());
+				}
+				
+				DepsArray.Add(MakeShared<FJsonValueObject>(DepObj));
+			}
+		}
+		
+		Response->SetArrayField(TEXT("dependencies"), DepsArray);
+		Response->SetNumberField(TEXT("dependencies_count"), DepsArray.Num());
+		
+		UE_LOG(LogUALContentCmd, Log, TEXT("Found %d dependencies for %s"), DepsArray.Num(), *AssetPath);
+	}
+	
+	// 7. 获取被引用项（哪些资产引用了这个资产）
+	if (bIncludeReferencers)
+	{
+		TArray<TSharedPtr<FJsonValue>> RefsArray;
+		TArray<FName> Referencers;
+		
+		AssetRegistry.GetReferencers(AssetData.PackageName, Referencers);
+		
+		for (const FName& RefName : Referencers)
+		{
+			FString RefPath = RefName.ToString();
+			// 过滤掉引擎内置资产
+			if (RefPath.StartsWith(TEXT("/Game/")) || RefPath.StartsWith(TEXT("/Content/")))
+			{
+				TSharedPtr<FJsonObject> RefObj = MakeShared<FJsonObject>();
+				RefObj->SetStringField(TEXT("path"), RefPath);
+				
+				// 尝试获取引用资产的类型
+				TArray<FAssetData> RefAssets;
+				AssetRegistry.GetAssetsByPackageName(RefName, RefAssets);
+				if (RefAssets.Num() > 0)
+				{
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+					RefObj->SetStringField(TEXT("class"), RefAssets[0].AssetClassPath.GetAssetName().ToString());
+#else
+					RefObj->SetStringField(TEXT("class"), RefAssets[0].AssetClass.ToString());
+#endif
+					RefObj->SetStringField(TEXT("name"), RefAssets[0].AssetName.ToString());
+				}
+				
+				RefsArray.Add(MakeShared<FJsonValueObject>(RefObj));
+			}
+		}
+		
+		Response->SetArrayField(TEXT("referencers"), RefsArray);
+		Response->SetNumberField(TEXT("referencers_count"), RefsArray.Num());
+		
+		UE_LOG(LogUALContentCmd, Log, TEXT("Found %d referencers for %s"), RefsArray.Num(), *AssetPath);
+	}
+	
+	// 8. 添加迁移提示
+	bool bHasDependencies = Response->HasField(TEXT("dependencies")) && 
+		Response->GetArrayField(TEXT("dependencies")).Num() > 0;
+	bool bHasReferencers = Response->HasField(TEXT("referencers")) && 
+		Response->GetArrayField(TEXT("referencers")).Num() > 0;
+	
+	FString MigrationHint;
+	if (bHasDependencies && bHasReferencers)
+	{
+		MigrationHint = TEXT("This asset has both dependencies and referencers. To migrate safely, include all dependencies. Referencers may need to be updated.");
+	}
+	else if (bHasDependencies)
+	{
+		MigrationHint = TEXT("This asset has dependencies. Include all listed dependencies when migrating.");
+	}
+	else if (bHasReferencers)
+	{
+		MigrationHint = TEXT("This asset is referenced by other assets. Deleting or moving may break references.");
+	}
+	else
+	{
+		MigrationHint = TEXT("This asset is self-contained with no dependencies or referencers.");
+	}
+	Response->SetStringField(TEXT("migration_hint"), MigrationHint);
 	
 	UAL_CommandUtils::SendResponse(RequestId, 200, Response);
 }

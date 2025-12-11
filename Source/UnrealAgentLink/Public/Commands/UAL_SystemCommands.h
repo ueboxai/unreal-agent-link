@@ -27,4 +27,7 @@ public:
 	
 	// system.get_performance_stats - 获取性能统计
 	static void Handle_GetPerformanceStats(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
+	// system.manage_plugin - 查询或修改插件状态
+	static void Handle_ManagePlugin(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 };
