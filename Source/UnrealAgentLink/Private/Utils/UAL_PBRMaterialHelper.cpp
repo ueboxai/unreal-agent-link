@@ -329,11 +329,13 @@ UMaterialInstanceConstant* FUAL_PBRMaterialHelper::CreatePBRMaterialInstance(
 	}
 	
 	// 7. 设置纹理参数到材质实例
+	// 参数名称匹配 M_UAMaster 母材质中的定义
+	
 	// Albedo/BaseColor
 	if (TextureGroup.Textures.Contains(EUAL_PBRTextureType::Albedo))
 	{
 		MatInst->SetTextureParameterValueEditorOnly(
-			FMaterialParameterInfo("BaseColor"), 
+			FMaterialParameterInfo("Albedo"), 
 			TextureGroup.Textures[EUAL_PBRTextureType::Albedo]);
 		UE_LOG(LogPBRHelper, Log, TEXT("Set Albedo texture"));
 	}
@@ -356,31 +358,30 @@ UMaterialInstanceConstant* FUAL_PBRMaterialHelper::CreatePBRMaterialInstance(
 		UE_LOG(LogPBRHelper, Log, TEXT("Set Roughness texture"));
 	}
 	
-	// Metallic
-	if (TextureGroup.Textures.Contains(EUAL_PBRTextureType::Metallic))
-	{
-		MatInst->SetTextureParameterValueEditorOnly(
-			FMaterialParameterInfo("Metallic"), 
-			TextureGroup.Textures[EUAL_PBRTextureType::Metallic]);
-		UE_LOG(LogPBRHelper, Log, TEXT("Set Metallic texture"));
-	}
-	
-	// AO
+	// AO (Ambient Occlusion) - 注意参数名有空格
 	if (TextureGroup.Textures.Contains(EUAL_PBRTextureType::AO))
 	{
 		MatInst->SetTextureParameterValueEditorOnly(
-			FMaterialParameterInfo("AmbientOcclusion"), 
+			FMaterialParameterInfo("Ambient Occlusion"), 
 			TextureGroup.Textures[EUAL_PBRTextureType::AO]);
 		UE_LOG(LogPBRHelper, Log, TEXT("Set AO texture"));
 	}
 	
-	// Emissive
-	if (TextureGroup.Textures.Contains(EUAL_PBRTextureType::Emissive))
+	// Overlay (用于叠加层贴图)
+	// 如果有 Height 或 Opacity 类型的贴图，尝试设置为 Overlay
+	if (TextureGroup.Textures.Contains(EUAL_PBRTextureType::Height))
 	{
 		MatInst->SetTextureParameterValueEditorOnly(
-			FMaterialParameterInfo("EmissiveColor"), 
-			TextureGroup.Textures[EUAL_PBRTextureType::Emissive]);
-		UE_LOG(LogPBRHelper, Log, TEXT("Set Emissive texture"));
+			FMaterialParameterInfo("Overlay"), 
+			TextureGroup.Textures[EUAL_PBRTextureType::Height]);
+		UE_LOG(LogPBRHelper, Log, TEXT("Set Overlay texture (from Height)"));
+	}
+	else if (TextureGroup.Textures.Contains(EUAL_PBRTextureType::Opacity))
+	{
+		MatInst->SetTextureParameterValueEditorOnly(
+			FMaterialParameterInfo("Overlay"), 
+			TextureGroup.Textures[EUAL_PBRTextureType::Opacity]);
+		UE_LOG(LogPBRHelper, Log, TEXT("Set Overlay texture (from Opacity)"));
 	}
 	
 	// 8. 标记为已修改并保存

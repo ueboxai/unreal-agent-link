@@ -64,8 +64,8 @@ struct FUAL_PBRMaterialOptions
 	
 	FUAL_PBRMaterialOptions()
 	{
-		// 默认使用引擎的标准PBR材质
-		MasterMaterialPath = TEXT("/Engine/EngineMaterials/DefaultMaterial");
+		// 默认使用插件自带的 PBR 母材质
+		MasterMaterialPath = TEXT("/UnrealAgentLink/Materials/M_UAMaster");
 	}
 };
 
