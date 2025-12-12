@@ -19,8 +19,17 @@
 #include "Algo/Sort.h"
 #include "Misc/EngineVersion.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "HAL/IConsoleManager.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogUALUtils, Log, All);
+
+// 批量创建上限：默认 50，可在控制台/命令行设置：ual.MaxBatchCreate 50
+// 注意：<= 0 表示不限制（用于调试/内网环境）。
+static TAutoConsoleVariable<int32> CVarUALMaxBatchCreate(
+	TEXT("ual.MaxBatchCreate"),
+	50,
+	TEXT("Max items allowed for batch create operations (<=0 means unlimited)."),
+	ECVF_Default);
 
 bool UAL_CommandUtils::IsZh()
 {
@@ -40,6 +49,11 @@ FString UAL_CommandUtils::LStr(const TCHAR* Zh, const TCHAR* En)
 FText UAL_CommandUtils::LText(const TCHAR* Zh, const TCHAR* En)
 {
 	return FText::FromString(LStr(Zh, En));
+}
+
+int32 UAL_CommandUtils::GetMaxBatchCreate()
+{
+	return CVarUALMaxBatchCreate.GetValueOnAnyThread();
 }
 
 UWorld* UAL_CommandUtils::GetTargetWorld()

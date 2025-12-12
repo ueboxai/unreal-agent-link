@@ -234,6 +234,25 @@ void FUAL_ActorCommands::Handle_SpawnActor(const TSharedPtr<FJsonObject>& Payloa
 	const TArray<TSharedPtr<FJsonValue>>* Instances = nullptr;
 	if (Payload->TryGetArrayField(TEXT("instances"), Instances) && Instances)
 	{
+		const int32 MaxBatch = UAL_CommandUtils::GetMaxBatchCreate();
+		if (MaxBatch > 0 && Instances->Num() > MaxBatch)
+		{
+			TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+			Details->SetStringField(TEXT("field"), TEXT("instances"));
+			Details->SetNumberField(TEXT("requested"), Instances->Num());
+			Details->SetNumberField(TEXT("max"), MaxBatch);
+			Details->SetStringField(TEXT("cvar"), TEXT("ual.MaxBatchCreate"));
+
+			const FString Msg = FString::Printf(
+				TEXT("%s: %d > %d"),
+				*UAL_CommandUtils::LStr(TEXT("批量创建数量超过上限"), TEXT("Batch create size exceeds limit")),
+				Instances->Num(),
+				MaxBatch);
+
+			UAL_CommandUtils::SendError(RequestId, 413, Msg, Details);
+			return;
+		}
+
 		TArray<TSharedPtr<FJsonValue>> Created;
 		int32 SuccessCount = 0;
 

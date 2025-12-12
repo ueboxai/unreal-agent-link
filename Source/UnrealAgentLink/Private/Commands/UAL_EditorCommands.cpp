@@ -316,25 +316,94 @@ TSharedPtr<FJsonObject> FUAL_EditorCommands::BuildProjectInfo()
 					Data->SetArrayField(TEXT("modules"), ModuleArray);
 				}
 			}
-		}
-	}
 
-	// 启用的插件信息（使用 PluginManager，兼容 5.0-5.7）
-	TArray<TSharedPtr<FJsonValue>> PluginArray;
-	IPluginManager& PluginManager = IPluginManager::Get();
-	const TArray<TSharedRef<IPlugin>> EnabledPlugins = PluginManager.GetEnabledPlugins();
-	for (const TSharedRef<IPlugin>& Plugin : EnabledPlugins)
-	{
-		TSharedPtr<FJsonObject> PluginObj = MakeShared<FJsonObject>();
-		PluginObj->SetStringField(TEXT("name"), Plugin->GetName());
-		PluginObj->SetStringField(TEXT("versionName"), Plugin->GetDescriptor().VersionName);
-		PluginObj->SetStringField(TEXT("category"), Plugin->GetDescriptor().Category);
-		PluginObj->SetStringField(TEXT("baseDir"), Plugin->GetBaseDir());
-		PluginArray.Add(MakeShared<FJsonValueObject>(PluginObj));
-	}
-	if (PluginArray.Num() > 0)
-	{
-		Data->SetArrayField(TEXT("enabledPlugins"), PluginArray);
+			// 插件列表：仅发送 .uproject 文件中声明的 Plugins（避免把 Engine/Plugins 也全部发出去）
+			// - projectPlugins: 完整列表（包含 enabled 标记）
+			// - enabledPlugins: 仅 enabled=true 的条目（为兼容旧字段名）
+			// - enabledPluginNames: 仅名称列表（便于前端/服务端快速使用）
+			const TArray<TSharedPtr<FJsonValue>>* ProjectPlugins = nullptr;
+			if (ProjectJson->TryGetArrayField(TEXT("Plugins"), ProjectPlugins) && ProjectPlugins)
+			{
+				IPluginManager& PluginManager = IPluginManager::Get();
+
+				TArray<TSharedPtr<FJsonValue>> ProjectPluginArray;
+				TArray<TSharedPtr<FJsonValue>> EnabledPluginArray;
+				TArray<TSharedPtr<FJsonValue>> EnabledPluginNames;
+
+				for (const TSharedPtr<FJsonValue>& Value : *ProjectPlugins)
+				{
+					if (!Value.IsValid() || Value->Type != EJson::Object)
+					{
+						continue;
+					}
+
+					const TSharedPtr<FJsonObject> PluginDecl = Value->AsObject();
+					if (!PluginDecl.IsValid())
+					{
+						continue;
+					}
+
+					FString PluginName;
+					// .uproject 标准字段为 Name/Enabled；这里也兼容小写 name/enabled
+					if (!PluginDecl->TryGetStringField(TEXT("Name"), PluginName))
+					{
+						PluginDecl->TryGetStringField(TEXT("name"), PluginName);
+					}
+					if (PluginName.IsEmpty())
+					{
+						continue;
+					}
+
+					bool bEnabled = true;
+					if (!PluginDecl->TryGetBoolField(TEXT("Enabled"), bEnabled))
+					{
+						PluginDecl->TryGetBoolField(TEXT("enabled"), bEnabled);
+					}
+
+					TSharedPtr<FJsonObject> PluginObj = MakeShared<FJsonObject>();
+					PluginObj->SetStringField(TEXT("name"), PluginName);
+					PluginObj->SetBoolField(TEXT("enabled"), bEnabled);
+
+					// 尝试补全插件元信息（如果插件在当前环境可解析）
+					{
+						const TSharedPtr<IPlugin> Plugin = PluginManager.FindPlugin(PluginName);
+						if (Plugin.IsValid())
+						{
+							PluginObj->SetStringField(TEXT("versionName"), Plugin->GetDescriptor().VersionName);
+							PluginObj->SetStringField(TEXT("category"), Plugin->GetDescriptor().Category);
+							PluginObj->SetStringField(TEXT("baseDir"), Plugin->GetBaseDir());
+						}
+						else
+						{
+							// 保持字段存在，避免消费端做大量判空
+							PluginObj->SetStringField(TEXT("versionName"), TEXT(""));
+							PluginObj->SetStringField(TEXT("category"), TEXT(""));
+							PluginObj->SetStringField(TEXT("baseDir"), TEXT(""));
+						}
+					}
+
+					ProjectPluginArray.Add(MakeShared<FJsonValueObject>(PluginObj));
+					if (bEnabled)
+					{
+						EnabledPluginArray.Add(MakeShared<FJsonValueObject>(PluginObj));
+						EnabledPluginNames.Add(MakeShared<FJsonValueString>(PluginName));
+					}
+				}
+
+				if (ProjectPluginArray.Num() > 0)
+				{
+					Data->SetArrayField(TEXT("projectPlugins"), ProjectPluginArray);
+				}
+				if (EnabledPluginArray.Num() > 0)
+				{
+					Data->SetArrayField(TEXT("enabledPlugins"), EnabledPluginArray);
+				}
+				if (EnabledPluginNames.Num() > 0)
+				{
+					Data->SetArrayField(TEXT("enabledPluginNames"), EnabledPluginNames);
+				}
+			}
+		}
 	}
 
 	return Data;

@@ -1623,6 +1623,25 @@ void FUAL_BlueprintCommands::Handle_AddNodeToBlueprint(const TSharedPtr<FJsonObj
 	const TArray<TSharedPtr<FJsonValue>>* NodesArray = nullptr;
 	if (Payload->TryGetArrayField(TEXT("nodes"), NodesArray) && NodesArray && NodesArray->Num() > 0)
 	{
+		const int32 MaxBatch = UAL_CommandUtils::GetMaxBatchCreate();
+		if (MaxBatch > 0 && NodesArray->Num() > MaxBatch)
+		{
+			TSharedPtr<FJsonObject> Details = MakeShared<FJsonObject>();
+			Details->SetStringField(TEXT("field"), TEXT("nodes"));
+			Details->SetNumberField(TEXT("requested"), NodesArray->Num());
+			Details->SetNumberField(TEXT("max"), MaxBatch);
+			Details->SetStringField(TEXT("cvar"), TEXT("ual.MaxBatchCreate"));
+
+			const FString Msg = FString::Printf(
+				TEXT("%s: %d > %d"),
+				*UAL_CommandUtils::LStr(TEXT("批量创建数量超过上限"), TEXT("Batch create size exceeds limit")),
+				NodesArray->Num(),
+				MaxBatch);
+
+			UAL_CommandUtils::SendError(RequestId, 413, Msg, Details);
+			return;
+		}
+
 		// 批量模式：blueprint_path 仍然是必填的公共参数
 		FString BlueprintPath;
 		if (!Payload->TryGetStringField(TEXT("blueprint_path"), BlueprintPath) || BlueprintPath.IsEmpty())

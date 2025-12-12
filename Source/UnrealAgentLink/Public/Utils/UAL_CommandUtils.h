@@ -10,6 +10,9 @@ public:
 	static FString LStr(const TCHAR* Zh, const TCHAR* En);
 	static FText LText(const TCHAR* Zh, const TCHAR* En);
 
+	// 批量创建上限（默认 50，可通过控制台变量 ual.MaxBatchCreate 调整；<=0 表示不限制）
+	static int32 GetMaxBatchCreate();
+
 	static UWorld* GetTargetWorld();
 
 	static FVector ReadVector(const TSharedPtr<FJsonObject>& Obj, const TCHAR* Field, const FVector& DefaultValue = FVector::ZeroVector);
