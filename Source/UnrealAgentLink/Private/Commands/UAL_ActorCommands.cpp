@@ -157,11 +157,24 @@ TSharedPtr<FJsonObject> FUAL_ActorCommands::SpawnSingleActor(const TSharedPtr<FJ
 	if (!DesiredName.IsEmpty())
 	{
 		Params.Name = FName(*DesiredName);
-		Params.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Requested;
+		// 使用 Required_ReturnNull 先尝试精确名称，失败后自动重试带后缀的名称
+		Params.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Required_ReturnNull;
 	}
 
 	const FTransform SpawnTransform(Rotation, Location);
 	AActor* Actor = World->SpawnActor(Resolved.SpawnClass, &SpawnTransform, Params);
+	
+	// 如果指定了名称但创建失败，尝试自动添加后缀
+	if (!Actor && !DesiredName.IsEmpty())
+	{
+		for (int32 Suffix = 1; Suffix <= 100 && !Actor; ++Suffix)
+		{
+			FString UniqueName = FString::Printf(TEXT("%s_%d"), *DesiredName, Suffix);
+			Params.Name = FName(*UniqueName);
+			Actor = World->SpawnActor(Resolved.SpawnClass, &SpawnTransform, Params);
+		}
+	}
+	
 	if (!Actor)
 	{
 		return nullptr;

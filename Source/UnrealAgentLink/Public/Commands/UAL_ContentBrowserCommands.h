@@ -73,4 +73,18 @@ public:
 	 * @param RequestId 请求 ID
 	 */
 	static void Handle_DescribeAsset(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	
+	/**
+	 * content.normalized_import - 规范化导入 uasset/umap 资产
+	 * 将外部工程的资产导入到规范化的目录结构中
+	 * 自动处理依赖闭包、包名重映射和引用修复
+	 * 
+	 * @param Payload 请求参数:
+	 *   - files: 要导入的文件路径列表
+	 *   - target_root: 可选，目标根目录（默认 /Game/Imported）
+	 *   - use_pascal_case: 可选，是否使用 PascalCase（默认 true）
+	 *   - auto_rename_on_conflict: 可选，冲突时是否自动重命名（默认 true）
+	 * @param RequestId 请求 ID
+	 */
+	static void Handle_NormalizedImport(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 };

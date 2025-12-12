@@ -1663,3 +1663,14 @@ void UAL_CommandUtils::SendError(const FString& RequestId, int32 Code, const FSt
 	ErrObj->SetStringField(TEXT("message"), Message);
 	SendResponse(RequestId, Code, ErrObj);
 }
+
+void UAL_CommandUtils::SendError(const FString& RequestId, int32 Code, const FString& Message, const TSharedPtr<FJsonObject>& Details)
+{
+	TSharedPtr<FJsonObject> ErrObj = MakeShared<FJsonObject>();
+	ErrObj->SetStringField(TEXT("message"), Message);
+	if (Details.IsValid())
+	{
+		ErrObj->SetObjectField(TEXT("details"), Details);
+	}
+	SendResponse(RequestId, Code, ErrObj);
+}

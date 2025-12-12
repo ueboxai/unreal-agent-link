@@ -36,8 +36,29 @@ public:
 	// blueprint.set_property - 设置蓝图属性（支持 CDO 和 SCS 组件）
 	static void Handle_SetBlueprintProperty(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 
+	// blueprint.add_variable - 添加蓝图成员变量
+	static void Handle_AddVariableToBlueprint(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
+	// blueprint.get_graph - 获取蓝图图表（节点、引脚等）
+	static void Handle_GetBlueprintGraph(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
+	// blueprint.add_node - 在图表中添加节点
+	static void Handle_AddNodeToBlueprint(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
+	// blueprint.add_timeline - 在图表中添加 Timeline 节点（Timeline 不是普通变量/节点，需要创建 TimelineTemplate）
+	static void Handle_AddTimelineToBlueprint(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
+	// blueprint.connect_pins - 连接两个节点的引脚
+	static void Handle_ConnectBlueprintPins(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
+	// blueprint.create_function - 创建蓝图函数图表（可选定义输入输出参数）
+	static void Handle_CreateFunctionGraph(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
 	// blueprint.compile - 编译蓝图并可选保存
 	static void Handle_CompileBlueprint(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
+	// blueprint.set_pin_value - 设置节点 Pin 的默认值
+	static void Handle_SetPinValue(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 
 	// ============================================================================
 	// 辅助函数

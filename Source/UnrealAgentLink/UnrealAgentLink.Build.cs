@@ -1,4 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
+// Rebuild triggered
+// Rebuild triggered
 
 using UnrealBuildTool;
 
@@ -20,6 +22,15 @@ public class UnrealAgentLink : ModuleRules
 			}
 		);
 		
+		PublicIncludePathModuleNames.AddRange(
+			new string[] {
+				"BlueprintGraph",
+				"GraphEditor",
+				"KismetCompiler",
+				"UnrealEd"
+			}
+		);
+		
 		PrivateIncludePaths.AddRange(
 			new string[]
 			{
@@ -37,7 +48,11 @@ public class UnrealAgentLink : ModuleRules
 				"Core",
 				"Json",
 				"JsonUtilities",
-				"WebSockets"
+				"WebSockets",
+				"BlueprintGraph",
+				"UnrealEd",
+				"KismetCompiler",
+				"GraphEditor" // Ensure editor graph headers are available
 			}
 			);
 			
@@ -48,9 +63,11 @@ public class UnrealAgentLink : ModuleRules
 				"Projects",
 				"InputCore",
 				"EditorFramework",
-				"UnrealEd",
+				"EditorFramework",
+				// "UnrealEd", // Moved to Public
 				"Kismet",
-				"KismetCompiler",
+				// "KismetCompiler", // Moved to Public
+				// "BlueprintGraph", // Moved to Public
 				"AssetTools",
 				"AssetRegistry",
 				"ToolMenus",

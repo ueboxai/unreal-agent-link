@@ -1,6 +1,7 @@
 #include "UAL_ContentBrowserCommands.h"
 #include "UAL_CommandUtils.h"
 #include "Utils/UAL_PBRMaterialHelper.h"
+#include "Utils/UAL_NormalizedImporter.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetToolsModule.h"
@@ -32,8 +33,9 @@ void FUAL_ContentBrowserCommands::RegisterCommands(
 	CommandMap.Add(TEXT("content.move"), &Handle_MoveAsset);
 	CommandMap.Add(TEXT("content.delete"), &Handle_DeleteAssets);
 	CommandMap.Add(TEXT("content.describe"), &Handle_DescribeAsset);
+	CommandMap.Add(TEXT("content.normalized_import"), &Handle_NormalizedImport);
 	
-	UE_LOG(LogUALContentCmd, Log, TEXT("ContentBrowser commands registered: content.search, content.import, content.move, content.delete, content.describe"));
+	UE_LOG(LogUALContentCmd, Log, TEXT("ContentBrowser commands registered: content.search, content.import, content.move, content.delete, content.describe, content.normalized_import"));
 }
 
 // ============================================================================
@@ -538,13 +540,9 @@ void FUAL_ContentBrowserCommands::Handle_MoveAsset(
 				FSavePackageArgs SaveArgs;
 				SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
 				
-				// UE 5.1+ 返回 FSavePackageResultStruct，5.0 返回 bool
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
-				FSavePackageResultStruct Result = UPackage::SavePackage(Package, MovedAsset, *PackageFileName, SaveArgs);
+				// 使用新的 SavePackageArgs API（UE 5.0+ 统一使用）
+				FSavePackageResultStruct Result = UPackage::Save(Package, MovedAsset, *PackageFileName, SaveArgs);
 				bSaved = Result.Result == ESavePackageResult::Success;
-#else
-				bSaved = UPackage::SavePackage(Package, MovedAsset, RF_Public | RF_Standalone, *PackageFileName);
-#endif
 				UE_LOG(LogUALContentCmd, Log, TEXT("Saved moved asset: %s (Success: %s)"), *PackageFileName, bSaved ? TEXT("true") : TEXT("false"));
 			}
 		}
@@ -924,4 +922,127 @@ void FUAL_ContentBrowserCommands::Handle_DescribeAsset(
 	Response->SetStringField(TEXT("migration_hint"), MigrationHint);
 	
 	UAL_CommandUtils::SendResponse(RequestId, 200, Response);
+}
+
+/**
+ * content.normalized_import - 规范化导入 uasset/umap 资产
+ * 将外部工程的资产导入到规范化的目录结构中
+ * 自动处理依赖闭包、包名重映射和引用修复
+ */
+void FUAL_ContentBrowserCommands::Handle_NormalizedImport(
+	const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+	// 解析 files 数组
+	const TArray<TSharedPtr<FJsonValue>>* FilesArray = nullptr;
+	if (!Payload->TryGetArrayField(TEXT("files"), FilesArray) || !FilesArray || FilesArray->Num() == 0)
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing or empty 'files' array"));
+		return;
+	}
+	
+	// 解析可选参数
+	FString TargetRoot = TEXT("/Game/Imported");
+	Payload->TryGetStringField(TEXT("target_root"), TargetRoot);
+	
+	bool bUsePascalCase = true;
+	Payload->TryGetBoolField(TEXT("use_pascal_case"), bUsePascalCase);
+	
+	bool bAutoRenameOnConflict = true;
+	Payload->TryGetBoolField(TEXT("auto_rename_on_conflict"), bAutoRenameOnConflict);
+	
+	UE_LOG(LogUALContentCmd, Log, TEXT("content.normalized_import: %d files -> %s"),
+		FilesArray->Num(), *TargetRoot);
+	
+	// 收集文件路径
+	TArray<FString> FilePaths;
+	for (const TSharedPtr<FJsonValue>& FileValue : *FilesArray)
+	{
+		FString FilePath;
+		if (FileValue->TryGetString(FilePath) && !FilePath.IsEmpty())
+		{
+			// 验证文件存在
+			if (FPaths::FileExists(FilePath))
+			{
+				FilePaths.Add(FilePath);
+			}
+			else
+			{
+				UE_LOG(LogUALContentCmd, Warning, TEXT("File not found: %s"), *FilePath);
+			}
+		}
+	}
+	
+	if (FilePaths.Num() == 0)
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("No valid files to import"));
+		return;
+	}
+	
+	// 配置导入规则
+	FUALImportRuleSet RuleSet;
+	RuleSet.InitDefaults();
+	RuleSet.TargetRoot = TargetRoot;
+	RuleSet.bUsePascalCase = bUsePascalCase;
+	RuleSet.bAutoRenameOnConflict = bAutoRenameOnConflict;
+	
+	// 执行规范化导入
+	FUALNormalizedImporter Importer;
+	FUALNormalizedImportSession Session;
+	
+	bool bSuccess = Importer.ExecuteNormalizedImport(FilePaths, RuleSet, Session);
+	
+	// 构建响应
+	TSharedPtr<FJsonObject> Response = MakeShared<FJsonObject>();
+	Response->SetBoolField(TEXT("ok"), bSuccess);
+	Response->SetNumberField(TEXT("total_files"), Session.TotalFiles);
+	Response->SetNumberField(TEXT("success_count"), Session.SuccessCount);
+	Response->SetNumberField(TEXT("failed_count"), Session.FailedCount);
+	
+	// 添加导入的资产信息
+	TArray<TSharedPtr<FJsonValue>> ImportedArray;
+	for (const FUALImportTargetInfo& Info : Session.TargetInfos)
+	{
+		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+		Item->SetStringField(TEXT("original_name"), Info.OriginalAssetName);
+		Item->SetStringField(TEXT("normalized_name"), Info.NormalizedAssetName);
+		Item->SetStringField(TEXT("old_path"), Info.OldPackageName.ToString());
+		Item->SetStringField(TEXT("new_path"), Info.NewPackageName.ToString());
+		Item->SetStringField(TEXT("class"), Info.AssetClass);
+		ImportedArray.Add(MakeShared<FJsonValueObject>(Item));
+	}
+	Response->SetArrayField(TEXT("imported"), ImportedArray);
+	
+	// 添加重定向映射
+	TArray<TSharedPtr<FJsonValue>> RedirectArray;
+	for (const auto& Pair : Session.RedirectMap)
+	{
+		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+		Item->SetStringField(TEXT("from"), Pair.Key.ToString());
+		Item->SetStringField(TEXT("to"), Pair.Value.ToString());
+		RedirectArray.Add(MakeShared<FJsonValueObject>(Item));
+	}
+	Response->SetArrayField(TEXT("redirects"), RedirectArray);
+	
+	// 添加错误和警告
+	if (Session.Errors.Num() > 0)
+	{
+		TArray<TSharedPtr<FJsonValue>> ErrorArray;
+		for (const FString& Error : Session.Errors)
+		{
+			ErrorArray.Add(MakeShared<FJsonValueString>(Error));
+		}
+		Response->SetArrayField(TEXT("errors"), ErrorArray);
+	}
+	
+	if (Session.Warnings.Num() > 0)
+	{
+		TArray<TSharedPtr<FJsonValue>> WarningArray;
+		for (const FString& Warning : Session.Warnings)
+		{
+			WarningArray.Add(MakeShared<FJsonValueString>(Warning));
+		}
+		Response->SetArrayField(TEXT("warnings"), WarningArray);
+	}
+	
+	UAL_CommandUtils::SendResponse(RequestId, bSuccess ? 200 : 500, Response);
 }

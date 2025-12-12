@@ -99,4 +99,6 @@ public:
 	// Network Helpers
 	static void SendResponse(const FString& RequestId, int32 Code, const TSharedPtr<FJsonObject>& Data = nullptr);
 	static void SendError(const FString& RequestId, int32 Code, const FString& Message);
+	// 带结构化 details 的错误（更“有人情味”，便于 Agent 自修复）
+	static void SendError(const FString& RequestId, int32 Code, const FString& Message, const TSharedPtr<FJsonObject>& Details);
 };
