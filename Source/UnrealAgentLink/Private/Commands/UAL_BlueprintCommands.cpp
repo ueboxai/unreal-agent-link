@@ -2707,7 +2707,10 @@ void FUAL_BlueprintCommands::Handle_AddTimelineToBlueprint(const TSharedPtr<FJso
 	NodeCreator.Finalize();
 
 	TimelineNode->TimelineName = TimelineName;
-	TimelineNode->TimelineTemplate = Template;
+	// TimelineTemplate 在 UE5.0 中不存在，由 ReconstructNode 自动关联
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+	TimelineNode->TimelineGuid = Template->TimelineGuid;
+#endif
 	TimelineNode->ReconstructNode();
 
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
@@ -2893,7 +2896,8 @@ void FUAL_BlueprintCommands::Handle_ConnectBlueprintPins(const TSharedPtr<FJsonO
 		return;
 	}
 
-	FString GraphName;
+	// GraphName 已在批量模式之前定义，此处复用
+	// 单连线模式需要重新读取 graph_name（因为前面仅在批量模式下初始化）
 	Payload->TryGetStringField(TEXT("graph_name"), GraphName);
 
 	UBlueprint* Blueprint = nullptr;
