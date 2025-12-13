@@ -35,6 +35,7 @@
 #include "K2Node_CustomEvent.h"
 #include "K2Node_MacroInstance.h"
 #include "K2Node_Timeline.h"
+#include "K2Node_Self.h"
 #include "Engine/TimelineTemplate.h"
 #include "Logging/TokenizedMessage.h"
 #if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
@@ -2576,6 +2577,16 @@ void FUAL_BlueprintCommands::Handle_AddNodeToBlueprint(const TSharedPtr<FJsonObj
 		NodeCreator.Finalize();
 		StructNode->ReconstructNode();
 		NewNodeBase = StructNode;
+	}
+	else if (NodeTypeLower == TEXT("self"))
+	{
+		FGraphNodeCreator<UK2Node_Self> NodeCreator(*Graph);
+		UK2Node_Self* SelfNode = NodeCreator.CreateNode();
+		SelfNode->NodePosX = PosX;
+		SelfNode->NodePosY = PosY;
+		NodeCreator.Finalize();
+		SelfNode->ReconstructNode();
+		NewNodeBase = SelfNode;
 	}
 	else
 	{
