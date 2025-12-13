@@ -60,6 +60,9 @@ public:
 	// blueprint.set_pin_value - 设置节点 Pin 的默认值
 	static void Handle_SetPinValue(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 
+	// blueprint.delete_node - 删除图表中的节点
+	static void Handle_DeleteNode(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
 	// ============================================================================
 	// 辅助函数
 	// ============================================================================

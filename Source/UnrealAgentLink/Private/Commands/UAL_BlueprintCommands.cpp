@@ -106,6 +106,11 @@ void FUAL_BlueprintCommands::RegisterCommands(TMap<FString, TFunction<void(const
 	{
 		Handle_SetPinValue(Payload, RequestId);
 	});
+
+	CommandMap.Add(TEXT("blueprint.delete_node"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_DeleteNode(Payload, RequestId);
+	});
 }
 
 // ============================================================================
@@ -3790,6 +3795,70 @@ void FUAL_BlueprintCommands::Handle_SetPinValue(const TSharedPtr<FJsonObject>& P
 	Result->SetStringField(TEXT("old_value"), OldValue);
 	Result->SetStringField(TEXT("new_value"), Value);
 	Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Set %s to \"%s\""), *PinName, *Value));
+
+	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
+}
+
+void FUAL_BlueprintCommands::Handle_DeleteNode(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+	FString BlueprintPath;
+	if (!Payload->TryGetStringField(TEXT("blueprint_path"), BlueprintPath) || BlueprintPath.IsEmpty())
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing field: blueprint_path"));
+		return;
+	}
+
+	FString NodeId;
+	if (!Payload->TryGetStringField(TEXT("node_id"), NodeId) || NodeId.IsEmpty())
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing field: node_id"));
+		return;
+	}
+
+	FString GraphName;
+	Payload->TryGetStringField(TEXT("graph_name"), GraphName);
+
+	UBlueprint* Blueprint = nullptr;
+	FString ResolvedPath;
+	if (!UAL_LoadBlueprintByPathOrName(BlueprintPath, Blueprint, ResolvedPath))
+	{
+		UAL_CommandUtils::SendError(RequestId, 404, FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		return;
+	}
+
+	UEdGraph* Graph = UAL_FindGraph(Blueprint, GraphName);
+	if (!Graph)
+	{
+		UAL_CommandUtils::SendError(RequestId, 404, FString::Printf(TEXT("Graph not found: %s"), *GraphName));
+		return;
+	}
+
+	UEdGraphNode* Node = UAL_FindNodeByGuid(Graph, NodeId);
+	if (!Node)
+	{
+		UAL_CommandUtils::SendError(RequestId, 404, FString::Printf(TEXT("Node not found with ID: %s"), *NodeId));
+		return;
+	}
+
+	// 记录节点信息用于返回
+	FString NodeClass = Node->GetClass()->GetName();
+	FString NodeTitle = Node->GetNodeTitle(ENodeTitleType::ListView).ToString();
+
+	Blueprint->Modify();
+	Graph->Modify();
+
+	// 使用编辑器工具删除节点（会自动处理连线断开等）
+	FBlueprintEditorUtils::RemoveNode(Blueprint, Node, true);
+
+	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+	
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("ok"), true);
+	Result->SetStringField(TEXT("blueprint_path"), ResolvedPath);
+	Result->SetStringField(TEXT("graph_name"), Graph->GetName());
+	Result->SetStringField(TEXT("node_id"), NodeId); // Return the ID of the deleted node
+	Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Deleted node %s (%s)"), *NodeTitle, *NodeClass));
+	
 	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
 }
 
