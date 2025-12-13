@@ -35,6 +35,12 @@ void FUAL_EditorCommands::RegisterCommands(TMap<FString, TFunction<void(const TS
 	{
 		Handle_GetProjectInfo(Payload, RequestId);
 	});
+
+	// 兼容别名：早期/上层工具可能使用 editor.get_project_info
+	CommandMap.Add(TEXT("editor.get_project_info"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_GetProjectInfo(Payload, RequestId);
+	});
 }
 
 // ========== 从 UAL_CommandHandler.cpp 迁移以下函数 ==========

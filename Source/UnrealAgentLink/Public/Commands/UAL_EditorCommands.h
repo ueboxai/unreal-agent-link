@@ -5,7 +5,7 @@
 
 /**
  * 编辑器命令处理器
- * 包含: editor.screenshot, project.info, take_screenshot
+ * 包含: editor.screenshot, take_screenshot, project.info, editor.get_project_info(兼容别名)
  * 
  * 对应文档: 编辑器工具接口文档.md
  */
