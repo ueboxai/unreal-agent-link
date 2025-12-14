@@ -126,4 +126,275 @@ public:
 	 * @param RequestId 请求 ID
 	 */
 	static void Handle_SetMaterialParam(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	
+	// ========================================================================
+	// Phase 1: 材质图表编辑命令
+	// ========================================================================
+	
+	/**
+	 * material.get_graph - 获取材质图表结构
+	 * 
+	 * 使用场景：
+	 * 1. 查看材质中所有表达式节点
+	 * 2. 获取节点的引脚和连接关系
+	 * 
+	 * 请求参数：
+	 * - path: 材质资产路径（必填）
+	 * - include_values: 是否包含节点当前值（可选，默认 true）
+	 * 
+	 * 响应数据：
+	 * - nodes: 节点列表（node_id, class, pins, position 等）
+	 * - connections: 连接列表（from -> to）
+	 * - material_pins: 材质主节点可用引脚
+	 */
+	static void Handle_GetMaterialGraph(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	
+	/**
+	 * material.add_node - 添加材质表达式节点
+	 * 
+	 * 使用场景：
+	 * 1. 添加 TextureSample、Constant、Math 等材质节点
+	 * 2. 创建参数节点（ScalarParameter、VectorParameter）
+	 * 
+	 * 请求参数：
+	 * - material_path: 材质资产路径（必填）
+	 * - node_type: 节点类型（必填）
+	 * - node_name: 参数名称（参数节点时使用）
+	 * - position: 节点位置（可选）
+	 * - initial_value: 初始值（可选）
+	 * - texture_path: 贴图路径（TextureSample 时使用）
+	 * 
+	 * 响应数据：
+	 * - node_id: 节点唯一标识
+	 * - pins: 引脚列表
+	 */
+	static void Handle_AddMaterialNode(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	
+	/**
+	 * material.connect_pins - 连接材质节点引脚
+	 * 
+	 * 使用场景：
+	 * 1. 连接节点输出到材质主节点
+	 * 2. 连接节点之间的引脚
+	 * 
+	 * 请求参数：
+	 * - material_path: 材质资产路径（必填）
+	 * - source_node: 源节点 ID（必填）
+	 * - source_pin: 源引脚名称（必填）
+	 * - target_node: 目标节点 ID（必填）
+	 * - target_pin: 目标引脚名称（必填）
+	 * 
+	 * 响应数据：
+	 * - connection: 连接信息
+	 */
+	static void Handle_ConnectMaterialPins(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	
+	/**
+	 * material.compile - 编译材质
+	 * 
+	 * 使用场景：
+	 * 1. 验证材质图表的正确性
+	 * 2. 生成 Shader 并获取编译错误
+	 * 
+	 * 请求参数：
+	 * - path: 材质资产路径（必填）
+	 * - force_recompile: 是否强制重新编译（可选）
+	 * 
+	 * 响应数据：
+	 * - compiled: 是否编译成功
+	 * - errors: 错误列表
+	 * - warnings: 警告列表
+	 */
+	static void Handle_CompileMaterial(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	
+	/**
+	 * material.set_node_value - 设置材质节点值
+	 * 
+	 * 使用场景：
+	 * 1. 修改 Constant 节点的数值
+	 * 2. 设置参数节点的默认值
+	 * 3. 更换 TextureSample 节点的贴图
+	 * 
+	 * 请求参数：
+	 * - material_path: 材质资产路径（必填）
+	 * - node_id: 节点 ID（必填）
+	 * - value: 要设置的值（必填）
+	 * - property_name: 属性名称（可选）
+	 * 
+	 * 响应数据：
+	 * - node_id: 节点 ID
+	 * - old_value: 修改前的值
+	 * - new_value: 修改后的值
+	 */
+	static void Handle_SetMaterialNodeValue(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	
+	/**
+	 * material.delete_node - 删除材质节点
+	 * 
+	 * 使用场景：
+	 * 1. 删除不需要的材质节点
+	 * 2. 清理材质图表
+	 * 
+	 * 请求参数：
+	 * - material_path: 材质资产路径（必填）
+	 * - node_id: 要删除的节点 ID（必填）
+	 * - disconnect_first: 是否先断开连接（可选，默认 true）
+	 * 
+	 * 响应数据：
+	 * - node_id: 被删除的节点 ID
+	 * - disconnected_count: 断开的连接数量
+	 */
+	static void Handle_DeleteMaterialNode(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	
+	// ========================================================================
+	// Phase 2: 材质管理命令（智能容错）
+	// ========================================================================
+	
+	/**
+	 * material.duplicate - 复制材质
+	 * 
+	 * 智能容错特性：
+	 * - 路径自动补全（省略 /Game/ 时自动添加）
+	 * - 模糊路径匹配（返回相似资产建议）
+	 * - 名称冲突自动处理
+	 * 
+	 * 请求参数：
+	 * - source_path: 源材质路径（支持简写）
+	 * - new_name: 新材质名称（可选）
+	 * - destination_path: 目标路径（可选）
+	 * 
+	 * 响应数据：
+	 * - new_path: 新材质的完整路径
+	 * - suggestions: 如失败，返回修复建议
+	 * - similar_assets: 相似资产列表（路径错误时）
+	 */
+	static void Handle_DuplicateMaterial(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	
+	/**
+	 * material.set_property - 设置材质属性
+	 * 
+	 * 智能容错特性：
+	 * - 属性值多格式支持（枚举名/中文/数字索引）
+	 * - 大小写不敏感
+	 * - 失败时返回有效值列表
+	 * 
+	 * 请求参数：
+	 * - path: 材质资产路径
+	 * - properties: 属性键值对
+	 *   - blend_mode: Opaque/Masked/Translucent/Additive（或 不透明/半透明）
+	 *   - shading_model: DefaultLit/Unlit/Subsurface（或 默认/无光照）
+	 *   - two_sided: 是否双面
+	 * 
+	 * 响应数据：
+	 * - updated_properties: 成功更新的属性
+	 * - failed_properties: 失败的属性及修复建议
+	 * - current_state: 当前材质状态
+	 */
+	static void Handle_SetMaterialProperty(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	
+	/**
+	 * material.create_instance - 创建材质实例
+	 * 
+	 * 智能容错特性：
+	 * - 父材质路径自动补全
+	 * - 实例名称自动生成
+	 * - 返回可用参数列表
+	 * 
+	 * 请求参数：
+	 * - parent_path: 父材质路径
+	 * - instance_name: 实例名称（可选）
+	 * - destination_path: 保存路径（可选）
+	 * - initial_params: 初始参数值（可选）
+	 * 
+	 * 响应数据：
+	 * - instance_path: 新实例路径
+	 * - available_params: 可用参数列表
+	 * - suggestions: 如失败，返回修复建议
+	 */
+	static void Handle_CreateMaterialInstance(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
+private:
+	// ========================================================================
+	// 智能容错辅助函数
+	// ========================================================================
+	
+	/**
+	 * 标准化资产路径（智能补全）
+	 * - 自动添加 /Game/ 前缀（如果缺失）
+	 * - 移除多余的斜杠
+	 * - 处理文件扩展名
+	 */
+	static FString NormalizePath(const FString& InputPath, const FString& DefaultPrefix = TEXT("/Game/Materials"));
+	
+	/**
+	 * 查找相似资产（用于路径错误时的建议）
+	 * @return 相似资产路径列表（最多5个）
+	 */
+	static TArray<FString> FindSimilarAssets(const FString& PartialPath, const FString& AssetClass = TEXT("MaterialInterface"));
+	
+	/**
+	 * 解析 BlendMode（支持多种格式）
+	 * @param Value 输入值（字符串或数字）
+	 * @param OutMode 输出的 BlendMode
+	 * @return 是否解析成功
+	 */
+	static bool ParseBlendMode(const FString& Value, EBlendMode& OutMode);
+	
+	/**
+	 * 解析 ShadingModel（支持多种格式）
+	 * @param Value 输入值
+	 * @param OutModel 输出的 ShadingModel  
+	 * @return 是否解析成功
+	 */
+	static bool ParseShadingModel(const FString& Value, EMaterialShadingModel& OutModel);
+	
+	/**
+	 * 获取 BlendMode 的有效值列表（用于错误提示）
+	 */
+	static TArray<FString> GetValidBlendModes();
+	
+	/**
+	 * 获取 ShadingModel 的有效值列表
+	 */
+	static TArray<FString> GetValidShadingModels();
+	
+	/**
+	 * 将初始值应用到材质节点
+	 * @param Expression 材质表达式节点
+	 * @param InitialValueObj 初始值对象
+	 */
+	static void ApplyInitialValueToNode(UMaterialExpression* Expression, const TSharedPtr<FJsonObject>& InitialValueObj);
+	
+	// ========================================================================
+	// Phase 3: 材质查询和预览命令
+	// ========================================================================
+	
+	/**
+	 * material.list - 列出材质资产
+	 * 
+	 * 请求参数：
+	 * - search_path: 搜索路径（可选，默认 /Game）
+	 * - name_filter: 名称过滤器（可选，支持 * 通配符）
+	 * - material_type: 类型过滤（all/material/instance）
+	 * - max_results: 最大返回数量（可选，默认50）
+	 * 
+	 * 响应数据：
+	 * - materials: 材质列表
+	 * - total_count: 总数量
+	 */
+	static void Handle_ListMaterials(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	
+	/**
+	 * material.preview - 预览材质信息
+	 * 
+	 * 请求参数：
+	 * - path: 材质路径
+	 * - preview_type: 预览类型（info/thumbnail）
+	 * - include_graph_summary: 是否包含图表摘要
+	 * 
+	 * 响应数据：
+	 * - material_name, material_type, blend_mode, shading_model
+	 * - node_count, texture_count, parameter_count
+	 */
+	static void Handle_PreviewMaterial(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 };

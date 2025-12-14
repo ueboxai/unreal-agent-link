@@ -81,6 +81,7 @@ public class UnrealAgentLink : ModuleRules
 				"RenderCore",
 				"RHI",
 				"GameProjectGeneration",
+				"PropertyEditor" // Added for FPropertyEditorModule
 			}
 			);
 
