@@ -43,6 +43,9 @@
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "Editor.h"
 #include "AssetToolsModule.h"
+#include "ScopedTransaction.h"
+#include "MaterialEditorUtilities.h"
+#include "MaterialGraph/MaterialGraph.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogUALMaterial, Log, All);
 
@@ -170,10 +173,7 @@ void FUAL_MaterialCommands::Handle_CreateMaterial(
 	}
 
 	// 4. 创建 UMaterial
-	if (GEditor)
-	{
-		GEditor->BeginTransaction(FText::FromString(TEXT("Create Material")));
-	}
+	FScopedTransaction Transaction(NSLOCTEXT("UALMaterial", "CreateMaterial", "Create Material"));
 
 	UMaterialFactoryNew* MaterialFactory = NewObject<UMaterialFactoryNew>();
 	UMaterial* NewMaterial = Cast<UMaterial>(MaterialFactory->FactoryCreateNew(
@@ -187,15 +187,13 @@ void FUAL_MaterialCommands::Handle_CreateMaterial(
 
 	if (!NewMaterial)
 	{
-		if (GEditor)
-		{
-			GEditor->CancelTransaction(0);
-		}
+		Transaction.Cancel();
 		UAL_CommandUtils::SendError(RequestId, 500, TEXT("Failed to create UMaterial"));
 		return;
 	}
 
 	// 标记新对象的修改
+	NewMaterial->PreEditChange(nullptr);
 	NewMaterial->Modify();
 
 	// 5. 设置材质属性
@@ -220,16 +218,28 @@ void FUAL_MaterialCommands::Handle_CreateMaterial(
 	NewMaterial->TwoSided = bTwoSided;
 
 	// 6. 标记已修改并保存
-	NewMaterial->PreEditChange(nullptr);
-	NewMaterial->PostEditChange();
+	FPropertyChangedEvent PropertyChangedEvent(nullptr, EPropertyChangeType::ValueSet);
+	NewMaterial->PostEditChangeProperty(PropertyChangedEvent);
+	
+	// 强制刷新材质编辑器图表和逻辑
+	if (NewMaterial && NewMaterial->MaterialGraph)
+	{
+		FMaterialEditorUtilities::UpdateMaterialAfterGraphChange(NewMaterial->MaterialGraph);
+	}
+	
 	NewMaterial->MarkPackageDirty();
 
 	// 通知资产注册表
 	FAssetRegistryModule::AssetCreated(NewMaterial);
 
+	// 仅通知属性面板刷新
 	if (GEditor)
 	{
-		GEditor->EndTransaction();
+		FPropertyEditorModule* PropertyModule = FModuleManager::GetModulePtr<FPropertyEditorModule>("PropertyEditor");
+		if (PropertyModule)
+		{
+			PropertyModule->NotifyCustomizationModuleChanged();
+		}
 	}
 
 	// 7. 构建响应
@@ -809,19 +819,15 @@ void FUAL_MaterialCommands::Handle_AddMaterialNode(
 	}
 
 	// 5. 创建表达式并添加到材质
-	if (GEditor)
-	{
-		GEditor->BeginTransaction(FText::FromString(TEXT("Add Material Node")));
-		Material->Modify();
-	}
+	FScopedTransaction Transaction(NSLOCTEXT("UALMaterial", "AddNode", "Add Material Node"));
+
+	Material->PreEditChange(nullptr);
+	Material->Modify();
 
 	NewExpression = NewObject<UMaterialExpression>(Material, ExpressionClass);
 	if (!NewExpression)
 	{
-		if (GEditor)
-		{
-			GEditor->CancelTransaction(0);
-		}
+		Transaction.Cancel();
 		UAL_CommandUtils::SendError(RequestId, 500, TEXT("Failed to create material expression"));
 		return;
 	}
@@ -867,22 +873,26 @@ void FUAL_MaterialCommands::Handle_AddMaterialNode(
 	}
 
 	// 标记材质已修改并刷新编辑器
-	Material->PreEditChange(nullptr);
-	Material->PostEditChange();
+	FPropertyChangedEvent PropertyChangedEvent(nullptr, EPropertyChangeType::ValueSet);
+	Material->PostEditChangeProperty(PropertyChangedEvent);
+	
+	// 强制刷新材质编辑器图表和逻辑
+	if (Material && Material->MaterialGraph)
+	{
+		FMaterialEditorUtilities::UpdateMaterialAfterGraphChange(Material->MaterialGraph);
+	}
+	
 	Material->MarkPackageDirty();
 
 	// 通知编辑器
 	if (GEditor)
 	{
 		// 刷新属性面板
-		FPropertyEditorModule& PropertyModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
-		PropertyModule.NotifyCustomizationModuleChanged();
-		
-		// 通知编辑器更新
-		GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->NotifyAssetOpened(Material, nullptr);
-
-		// 结束事务
-		GEditor->EndTransaction();
+		FPropertyEditorModule* PropertyModule = FModuleManager::GetModulePtr<FPropertyEditorModule>("PropertyEditor");
+		if (PropertyModule)
+		{
+			PropertyModule->NotifyCustomizationModuleChanged();
+		}
 	}
 
 	// 8. 生成节点 ID
@@ -977,14 +987,15 @@ void FUAL_MaterialCommands::Handle_ConnectMaterialPins(
 	}
 
 	// 4. 连接到材质主节点
+
+	// 4. 连接到材质主节点
 	if (TargetNode == TEXT("Material"))
 	{
-		// 开始事务
-		if (GEditor)
-		{
-			GEditor->BeginTransaction(FText::FromString(TEXT("Connect Material Pins")));
-			Material->Modify();
-		}
+		// 使用 FScopedTransaction 管理事务
+		FScopedTransaction Transaction(NSLOCTEXT("UALMaterial", "ConnectPins", "Connect Material Pins"));
+		
+		Material->PreEditChange(nullptr);
+		Material->Modify();
 
 		// 映射 target_pin 到材质属性
 		bool bConnected = false;
@@ -1097,32 +1108,33 @@ void FUAL_MaterialCommands::Handle_ConnectMaterialPins(
 
 		if (!bConnected)
 		{
-			if (GEditor)
-			{
-				GEditor->CancelTransaction(0);
-			}
+			Transaction.Cancel();
 			UAL_CommandUtils::SendError(RequestId, 400, 
 				FString::Printf(TEXT("Unknown material pin: %s"), *TargetPin));
 			return;
 		}
 
 		// 标记材质已修改并刷新编辑器
-		Material->PreEditChange(nullptr);
-		Material->PostEditChange();
+		FPropertyChangedEvent PropertyChangedEvent(nullptr, EPropertyChangeType::ValueSet);
+		Material->PostEditChangeProperty(PropertyChangedEvent);
+		
+		// 强制刷新材质编辑器图表和逻辑
+		if (Material && Material->MaterialGraph)
+		{
+			FMaterialEditorUtilities::UpdateMaterialAfterGraphChange(Material->MaterialGraph);
+		}
+		
 		Material->MarkPackageDirty();
 
 		// 通知编辑器
 		if (GEditor)
 		{
 			// 刷新属性面板
-			FPropertyEditorModule& PropertyModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
-			PropertyModule.NotifyCustomizationModuleChanged();
-			
-			// 通知编辑器更新
-			GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->NotifyAssetOpened(Material, nullptr);
-			
-			// 结束事务
-			GEditor->EndTransaction();
+			FPropertyEditorModule* PropertyModule = FModuleManager::GetModulePtr<FPropertyEditorModule>("PropertyEditor");
+			if (PropertyModule)
+			{
+				PropertyModule->NotifyCustomizationModuleChanged();
+			}
 		}
 
 		// 构建响应
@@ -1259,13 +1271,13 @@ void FUAL_MaterialCommands::Handle_SetMaterialNodeValue(
 	Data->SetStringField(TEXT("node_id"), NodeId);
 	Data->SetStringField(TEXT("property_name"), PropertyName.IsEmpty() ? TEXT("Value") : PropertyName);
 
-	// 开始事务
-	if (GEditor)
-	{
-		GEditor->BeginTransaction(FText::FromString(TEXT("Set Material Node Value")));
-		Material->Modify();
-		TargetExpression->Modify();
-	}
+	// 使用 FScopedTransaction 管理事务
+	FScopedTransaction Transaction(NSLOCTEXT("UALMaterial", "SetNodeValue", "Set Material Node Value"));
+	
+	// 在修改值之前调用 PreEdit 和 Modify
+	Material->PreEditChange(nullptr);
+	Material->Modify();
+	TargetExpression->Modify();
 
 	// 尝试设置标量值
 	double ScalarValue;
@@ -1290,28 +1302,36 @@ void FUAL_MaterialCommands::Handle_SetMaterialNodeValue(
 
 	if (bModified)
 	{
-		// 标记材质已修改并刷新编辑器
-		Material->PreEditChange(nullptr);
-		Material->PostEditChange();
+		// 广播变更并刷新编辑器
+		FPropertyChangedEvent PropertyChangedEvent(nullptr, EPropertyChangeType::ValueSet);
+		
+		// 必须刷新具体的节点 (这会让节点在图表中刷新显示)
+		TargetExpression->PostEditChangeProperty(PropertyChangedEvent);
+		
+		// 最后再通知材质 (触发整体编译)
+		Material->PostEditChangeProperty(PropertyChangedEvent);
+		
+		// 强制刷新材质编辑器图表和逻辑
+		if (Material && Material->MaterialGraph)
+		{
+			FMaterialEditorUtilities::UpdateMaterialAfterGraphChange(Material->MaterialGraph);
+		}
+		
 		Material->MarkPackageDirty();
 
-		// 通知编辑器
 		if (GEditor)
 		{
-			// 刷新属性面板
-			FPropertyEditorModule& PropertyModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
-			PropertyModule.NotifyCustomizationModuleChanged();
-			
-			// 通知编辑器更新
-			GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->NotifyAssetOpened(Material, nullptr);
-			
-			// 结束事务
-			GEditor->EndTransaction();
+			FPropertyEditorModule* PropertyModule = FModuleManager::GetModulePtr<FPropertyEditorModule>("PropertyEditor");
+			if (PropertyModule)
+			{
+				PropertyModule->NotifyCustomizationModuleChanged();
+			}
 		}
 	}
-	else if (GEditor)
+	else 
 	{
-		GEditor->CancelTransaction(0);
+		// 取消事务
+		Transaction.Cancel();
 	}
 
 	UE_LOG(LogUALMaterial, Log, TEXT("Set value for node %s in material %s"), 
@@ -1376,12 +1396,11 @@ void FUAL_MaterialCommands::Handle_DeleteMaterialNode(
 	}
 
 	// 4. 从材质中移除节点
-	if (GEditor)
-	{
-		GEditor->BeginTransaction(FText::FromString(TEXT("Delete Material Node")));
-		Material->Modify();
-	}
-
+	FScopedTransaction Transaction(NSLOCTEXT("UALMaterial", "DeleteNode", "Delete Material Node"));
+	
+	Material->PreEditChange(nullptr);
+	Material->Modify();
+	
 #if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
 	Material->GetExpressionCollection().RemoveExpression(TargetExpression);
 #else
@@ -1389,22 +1408,26 @@ void FUAL_MaterialCommands::Handle_DeleteMaterialNode(
 #endif
 
 	// 5. 标记材质已修改并刷新编辑器
-	Material->PreEditChange(nullptr);
-	Material->PostEditChange();
+	FPropertyChangedEvent PropertyChangedEvent(nullptr, EPropertyChangeType::ValueSet);
+	Material->PostEditChangeProperty(PropertyChangedEvent);
+	
+	// 强制刷新材质编辑器图表和逻辑
+	if (Material && Material->MaterialGraph)
+	{
+		FMaterialEditorUtilities::UpdateMaterialAfterGraphChange(Material->MaterialGraph);
+	}
+	
 	Material->MarkPackageDirty();
 
 	// 通知编辑器
 	if (GEditor)
 	{
 		// 刷新属性面板
-		FPropertyEditorModule& PropertyModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
-		PropertyModule.NotifyCustomizationModuleChanged();
-		
-		// 通知编辑器更新
-		GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->NotifyAssetOpened(Material, nullptr);
-		
-		// 结束事务
-		GEditor->EndTransaction();
+		FPropertyEditorModule* PropertyModule = FModuleManager::GetModulePtr<FPropertyEditorModule>("PropertyEditor");
+		if (PropertyModule)
+		{
+			PropertyModule->NotifyCustomizationModuleChanged();
+		}
 	}
 
 	// 6. 构建响应
@@ -1704,10 +1727,7 @@ void FUAL_MaterialCommands::Handle_DuplicateMaterial(
 	// 5. 执行复制 (使用 AssetTools 以更好支持编辑器集成)
 	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
 	
-	if (GEditor)
-	{
-		GEditor->BeginTransaction(FText::FromString(TEXT("Duplicate Material")));
-	}
+	FScopedTransaction Transaction(NSLOCTEXT("UALMaterial", "DuplicateMaterial", "Duplicate Material"));
 
 	UObject* DuplicatedAsset = AssetToolsModule.Get().DuplicateAsset(
 		FPaths::GetBaseFilename(NewAssetPath), 
@@ -1716,21 +1736,13 @@ void FUAL_MaterialCommands::Handle_DuplicateMaterial(
 
 	if (!DuplicatedAsset)
 	{
-		if (GEditor)
-		{
-			GEditor->CancelTransaction(0);
-		}
+		Transaction.Cancel();
 		UAL_CommandUtils::SendError(RequestId, 500, TEXT("Failed to duplicate material"));
 		return;
 	}
 
 	// 标记已创建
 	FAssetRegistryModule::AssetCreated(DuplicatedAsset);
-
-	if (GEditor)
-	{
-		GEditor->EndTransaction();
-	}
 	
 	// 6. 构建响应
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
@@ -1779,12 +1791,12 @@ void FUAL_MaterialCommands::Handle_SetMaterialProperty(
 	TArray<FString> UpdatedProperties;
 	TArray<TSharedPtr<FJsonValue>> FailedProperties;
 
-	// 开始事务，以便支持撤回
-	if (GEditor)
-	{
-		GEditor->BeginTransaction(FText::FromString(TEXT("Set Material Properties")));
-		Material->Modify();
-	}
+	// 使用 FScopedTransaction 自动管理事务生命周期
+	FScopedTransaction Transaction(NSLOCTEXT("UALMaterial", "SetMaterialProperty", "Set Material Properties"));
+	
+	// 在修改任何属性前调用 PreEditChange 和 Modify
+	Material->PreEditChange(nullptr);
+	Material->Modify();
 	
 	// blend_mode
 	FString BlendModeStr;
@@ -1847,32 +1859,32 @@ void FUAL_MaterialCommands::Handle_SetMaterialProperty(
 	// 5. 标记材质已修改并刷新编辑器
 	if (UpdatedProperties.Num() > 0)
 	{
-		Material->PreEditChange(nullptr);
-		Material->PostEditChange();
+		// 广播属性变更 (触发重编译和 UI 更新)
+		FPropertyChangedEvent PropertyChangedEvent(nullptr, EPropertyChangeType::ValueSet);
+		Material->PostEditChangeProperty(PropertyChangedEvent);
+		
+		// 强制刷新材质编辑器图表和逻辑
+		if (Material && Material->MaterialGraph)
+		{
+			FMaterialEditorUtilities::UpdateMaterialAfterGraphChange(Material->MaterialGraph);
+		}
+		
 		Material->MarkPackageDirty();
 		
-		// 通知编辑器刷新已打开的材质编辑器
+		// 仅通知属性面板刷新
 		if (GEditor)
 		{
-			// 刷新属性面板
-			FPropertyEditorModule& PropertyModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
-			PropertyModule.NotifyCustomizationModuleChanged();
-			
-			// 通知资产编辑器更新
-			GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->NotifyAssetOpened(Material, nullptr);
-			
-			// 广播材质变化
-			FPropertyChangedEvent PropertyChangedEvent(nullptr);
-			Material->PostEditChangeProperty(PropertyChangedEvent);
-
-			// 结束事务
-			GEditor->EndTransaction();
+			FPropertyEditorModule* PropertyModule = FModuleManager::GetModulePtr<FPropertyEditorModule>("PropertyEditor");
+			if (PropertyModule)
+			{
+				PropertyModule->NotifyCustomizationModuleChanged();
+			}
 		}
 	}
-	else if (GEditor)
+	else 
 	{
-		// 如果没有修改属性，取消事务
-		GEditor->CancelTransaction(0);
+		// 如果没有修改，取消事务
+		Transaction.Cancel();
 	}
 	
 	// 6. 构建响应
@@ -1969,10 +1981,7 @@ void FUAL_MaterialCommands::Handle_CreateMaterialInstance(
 	}
 	
 	// 4. 创建材质实例 (使用 Factory 和事务)
-	if (GEditor)
-	{
-		GEditor->BeginTransaction(FText::FromString(TEXT("Create Material Instance")));
-	}
+	FScopedTransaction Transaction(NSLOCTEXT("UALMaterial", "CreateMaterialInstance", "Create Material Instance"));
 
 	UMaterialInstanceConstantFactoryNew* Factory = NewObject<UMaterialInstanceConstantFactoryNew>();
 	Factory->InitialParent = ParentMaterial;
@@ -1989,10 +1998,7 @@ void FUAL_MaterialCommands::Handle_CreateMaterialInstance(
 
 	if (!NewInstance)
 	{
-		if (GEditor)
-		{
-			GEditor->CancelTransaction(0);
-		}
+		Transaction.Cancel();
 		UAL_CommandUtils::SendError(RequestId, 500, TEXT("Failed to create material instance"));
 		return;
 	}
@@ -2001,10 +2007,6 @@ void FUAL_MaterialCommands::Handle_CreateMaterialInstance(
 	NewInstance->MarkPackageDirty();
 	FAssetRegistryModule::AssetCreated(NewInstance);
 
-	if (GEditor)
-	{
-		GEditor->EndTransaction();
-	}
 	
 	// 6. 收集可用参数信息
 	TArray<TSharedPtr<FJsonValue>> ScalarParams;
