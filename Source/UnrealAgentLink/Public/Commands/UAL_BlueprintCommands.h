@@ -63,6 +63,33 @@ public:
 	// blueprint.delete_node - 删除图表中的节点
 	static void Handle_DeleteNode(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 
+	/**
+	 * blueprint.create_graph - 声明式蓝图图表创建（原子操作）
+	 * 
+	 * 一次性创建完整的蓝图图表，包括所有节点和连线。
+	 * 这是一个原子操作：要么全部成功，要么全部失败。
+	 * 
+	 * 参数格式：
+	 * {
+	 *   "blueprint_path": "/Game/Blueprints/BP_Test",
+	 *   "graph_name": "EventGraph",  // 可选，默认 EventGraph
+	 *   "clear_existing": false,      // 可选，是否清除现有节点
+	 *   "nodes": [
+	 *     { "id": "node1", "type": "Event", "name": "BeginPlay" },
+	 *     { "id": "node2", "type": "Function", "name": "KismetSystemLibrary.PrintString" }
+	 *   ],
+	 *   "connections": [
+	 *     ["node1.Then", "node2.execute"]
+	 *   ],
+	 *   "pin_values": {  // 可选，设置 Pin 默认值
+	 *     "node2.InString": "Hello World"
+	 *   },
+	 *   "auto_layout": true,  // 可选，自动布局
+	 *   "compile": true       // 可选，完成后编译
+	 * }
+	 */
+	static void Handle_CreateGraphDeclarative(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
 	// ============================================================================
 	// 辅助函数
 	// ============================================================================

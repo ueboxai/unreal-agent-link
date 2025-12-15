@@ -111,6 +111,12 @@ void FUAL_BlueprintCommands::RegisterCommands(TMap<FString, TFunction<void(const
 	{
 		Handle_DeleteNode(Payload, RequestId);
 	});
+
+	// blueprint.create_graph - 声明式蓝图图表创建（原子操作）
+	CommandMap.Add(TEXT("blueprint.create_graph"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_CreateGraphDeclarative(Payload, RequestId);
+	});
 }
 
 // ============================================================================
@@ -3858,6 +3864,486 @@ void FUAL_BlueprintCommands::Handle_DeleteNode(const TSharedPtr<FJsonObject>& Pa
 	Result->SetStringField(TEXT("graph_name"), Graph->GetName());
 	Result->SetStringField(TEXT("node_id"), NodeId); // Return the ID of the deleted node
 	Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Deleted node %s (%s)"), *NodeTitle, *NodeClass));
+	
+	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
+}
+
+// ============================================================================
+// blueprint.create_graph - 声明式蓝图图表创建（原子操作）
+// ============================================================================
+
+/**
+ * 内部辅助：根据 node_type 和 node_name 创建节点（简化版）
+ * 支持：Event, Function, Branch, Sequence, Self
+ * @return 创建的节点指针，失败返回 nullptr 并设置 OutError
+ */
+static UEdGraphNode* UAL_CreateNodeInternal(
+	UBlueprint* Blueprint,
+	UEdGraph* Graph,
+	const FString& NodeType,
+	const FString& NodeName,
+	const FString& TargetClass,
+	int32 PosX,
+	int32 PosY,
+	FString& OutError
+)
+{
+	if (!Blueprint || !Graph)
+	{
+		OutError = TEXT("Invalid Blueprint or Graph");
+		return nullptr;
+	}
+
+	const FString TypeLower = NodeType.ToLower();
+
+	// ===== Event 节点 =====
+	if (TypeLower == TEXT("event"))
+	{
+		FString EventFuncName = NodeName;
+		if (EventFuncName.Equals(TEXT("BeginPlay"), ESearchCase::IgnoreCase))
+		{
+			EventFuncName = TEXT("ReceiveBeginPlay");
+		}
+		else if (EventFuncName.Equals(TEXT("Tick"), ESearchCase::IgnoreCase))
+		{
+			EventFuncName = TEXT("ReceiveTick");
+		}
+		else if (!EventFuncName.StartsWith(TEXT("Receive")) && !EventFuncName.StartsWith(TEXT("On")))
+		{
+			EventFuncName = TEXT("Receive") + EventFuncName;
+		}
+
+		UClass* OwnerClass = Blueprint->ParentClass ? Blueprint->ParentClass : AActor::StaticClass();
+		UFunction* EventFunc = OwnerClass ? OwnerClass->FindFunctionByName(FName(*EventFuncName)) : nullptr;
+		if (!EventFunc)
+		{
+			OutError = FString::Printf(TEXT("Event function not found: %s"), *EventFuncName);
+			return nullptr;
+		}
+
+		FGraphNodeCreator<UK2Node_Event> NodeCreator(*Graph);
+		UK2Node_Event* EventNode = NodeCreator.CreateNode();
+		EventNode->EventReference.SetExternalMember(EventFunc->GetFName(), OwnerClass);
+		EventNode->bOverrideFunction = true;
+		EventNode->NodePosX = PosX;
+		EventNode->NodePosY = PosY;
+		NodeCreator.Finalize();
+		EventNode->ReconstructNode();
+		return EventNode;
+	}
+	// ===== Function 节点 =====
+	else if (TypeLower == TEXT("function"))
+	{
+		FString ClassPart, FuncPart;
+		if (!NodeName.Split(TEXT("."), &ClassPart, &FuncPart))
+		{
+			FuncPart = NodeName;
+		}
+
+		UFunction* TargetFunc = nullptr;
+		UClass* FuncClass = nullptr;
+
+		if (!ClassPart.IsEmpty())
+		{
+			FString ClassError;
+			FuncClass = UAL_CommandUtils::ResolveClassFromIdentifier(ClassPart, UObject::StaticClass(), ClassError);
+			if (!FuncClass)
+			{
+				FuncClass = UAL_CommandUtils::ResolveClassFromIdentifier(TEXT("U") + ClassPart, UObject::StaticClass(), ClassError);
+			}
+			if (FuncClass)
+			{
+				TargetFunc = FuncClass->FindFunctionByName(FName(*FuncPart));
+			}
+		}
+		else
+		{
+			// 常用库函数查找
+			const TArray<FString> CommonLibs = {
+				TEXT("KismetMathLibrary"),
+				TEXT("KismetSystemLibrary"),
+				TEXT("GameplayStatics"),
+				TEXT("KismetStringLibrary")
+			};
+			for (const FString& LibName : CommonLibs)
+			{
+				FString ClassError;
+				if (UClass* LibClass = UAL_CommandUtils::ResolveClassFromIdentifier(LibName, UObject::StaticClass(), ClassError))
+				{
+					if (UFunction* F = LibClass->FindFunctionByName(FName(*FuncPart)))
+					{
+						FuncClass = LibClass;
+						TargetFunc = F;
+						break;
+					}
+				}
+			}
+		}
+
+		if (!TargetFunc || !FuncClass)
+		{
+			OutError = FString::Printf(TEXT("Function not found: %s"), *NodeName);
+			return nullptr;
+		}
+
+		FGraphNodeCreator<UK2Node_CallFunction> NodeCreator(*Graph);
+		UK2Node_CallFunction* CallNode = NodeCreator.CreateNode();
+		CallNode->FunctionReference.SetExternalMember(TargetFunc->GetFName(), FuncClass);
+		CallNode->NodePosX = PosX;
+		CallNode->NodePosY = PosY;
+		NodeCreator.Finalize();
+		CallNode->ReconstructNode();
+		return CallNode;
+	}
+	// ===== Branch 节点 =====
+	else if (TypeLower == TEXT("branch") || TypeLower == TEXT("if"))
+	{
+		FGraphNodeCreator<UK2Node_IfThenElse> NodeCreator(*Graph);
+		UK2Node_IfThenElse* IfNode = NodeCreator.CreateNode();
+		IfNode->NodePosX = PosX;
+		IfNode->NodePosY = PosY;
+		NodeCreator.Finalize();
+		return IfNode;
+	}
+	// ===== Sequence 节点 =====
+	else if (TypeLower == TEXT("sequence"))
+	{
+		FGraphNodeCreator<UK2Node_ExecutionSequence> NodeCreator(*Graph);
+		UK2Node_ExecutionSequence* SeqNode = NodeCreator.CreateNode();
+		SeqNode->NodePosX = PosX;
+		SeqNode->NodePosY = PosY;
+		NodeCreator.Finalize();
+		return SeqNode;
+	}
+	// ===== Self 节点 =====
+	else if (TypeLower == TEXT("self"))
+	{
+		FGraphNodeCreator<UK2Node_Self> NodeCreator(*Graph);
+		UK2Node_Self* SelfNode = NodeCreator.CreateNode();
+		SelfNode->NodePosX = PosX;
+		SelfNode->NodePosY = PosY;
+		NodeCreator.Finalize();
+		return SelfNode;
+	}
+
+	OutError = FString::Printf(TEXT("Unsupported node type: %s"), *NodeType);
+	return nullptr;
+}
+
+void FUAL_BlueprintCommands::Handle_CreateGraphDeclarative(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+	// ===== 1. 解析必填参数 =====
+	FString BlueprintPath;
+	if (!Payload->TryGetStringField(TEXT("blueprint_path"), BlueprintPath) || BlueprintPath.IsEmpty())
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required field: blueprint_path"));
+		return;
+	}
+
+	// nodes 数组是必填的
+	const TArray<TSharedPtr<FJsonValue>>* NodesArray = nullptr;
+	if (!Payload->TryGetArrayField(TEXT("nodes"), NodesArray) || !NodesArray || NodesArray->Num() == 0)
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing or empty required field: nodes"));
+		return;
+	}
+
+	// ===== 2. 解析可选参数 =====
+	FString GraphName;
+	Payload->TryGetStringField(TEXT("graph_name"), GraphName);
+	
+	bool bClearExisting = false;
+	Payload->TryGetBoolField(TEXT("clear_existing"), bClearExisting);
+	
+	bool bAutoLayout = true;
+	Payload->TryGetBoolField(TEXT("auto_layout"), bAutoLayout);
+	
+	bool bCompile = true;
+	Payload->TryGetBoolField(TEXT("compile"), bCompile);
+
+	const TArray<TSharedPtr<FJsonValue>>* ConnectionsArray = nullptr;
+	Payload->TryGetArrayField(TEXT("connections"), ConnectionsArray);
+
+	const TSharedPtr<FJsonObject>* PinValuesObj = nullptr;
+	Payload->TryGetObjectField(TEXT("pin_values"), PinValuesObj);
+
+	// ===== 3. 加载蓝图 =====
+	UBlueprint* Blueprint = nullptr;
+	FString ResolvedPath;
+	if (!UAL_LoadBlueprintByPathOrName(BlueprintPath, Blueprint, ResolvedPath) || !Blueprint)
+	{
+		UAL_CommandUtils::SendError(RequestId, 404, FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		return;
+	}
+
+	// ===== 4. 获取图表 =====
+	UEdGraph* Graph = UAL_FindGraph(Blueprint, GraphName);
+	if (!Graph)
+	{
+		UAL_CommandUtils::SendError(RequestId, 404, FString::Printf(TEXT("Graph not found: %s"), GraphName.IsEmpty() ? TEXT("EventGraph") : *GraphName));
+		return;
+	}
+
+	Blueprint->Modify();
+	Graph->Modify();
+
+	// ===== 5. 可选：清除现有节点（保留 Entry/Result 节点）=====
+	if (bClearExisting)
+	{
+		TArray<UEdGraphNode*> NodesToRemove;
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (!Node) continue;
+			// 保留函数入口/出口节点
+			if (Node->IsA<UK2Node_FunctionEntry>() || Node->IsA<UK2Node_FunctionResult>())
+			{
+				continue;
+			}
+			NodesToRemove.Add(Node);
+		}
+		for (UEdGraphNode* Node : NodesToRemove)
+		{
+			FBlueprintEditorUtils::RemoveNode(Blueprint, Node, true);
+		}
+	}
+
+	// ===== 6. 创建节点 =====
+	TMap<FString, UEdGraphNode*> NodeIdMap;  // 用户 id -> 节点指针
+	TArray<TSharedPtr<FJsonValue>> CreatedNodesInfo;
+	TArray<FString> Errors;
+	
+	int32 NextPosX = 0;
+	int32 NextPosY = 0;
+	const int32 StepX = 350;
+	const int32 StepY = 200;
+	
+	for (int32 i = 0; i < NodesArray->Num(); ++i)
+	{
+		const TSharedPtr<FJsonValue>& NodeVal = (*NodesArray)[i];
+		const TSharedPtr<FJsonObject>* NodeObjPtr = nullptr;
+		if (!NodeVal.IsValid() || !NodeVal->TryGetObject(NodeObjPtr) || !NodeObjPtr || !(*NodeObjPtr).IsValid())
+		{
+			Errors.Add(FString::Printf(TEXT("nodes[%d]: invalid object"), i));
+			continue;
+		}
+		const TSharedPtr<FJsonObject>& NodeObj = *NodeObjPtr;
+		
+		// 解析节点参数（V2 兼容：支持 class/member_name 别名）
+		FString NodeId, NodeType, NodeName, TargetClassStr;
+		NodeObj->TryGetStringField(TEXT("id"), NodeId);
+		
+		// V2 兼容：class 或 type
+		if (!NodeObj->TryGetStringField(TEXT("class"), NodeType))
+		{
+			NodeObj->TryGetStringField(TEXT("type"), NodeType);
+		}
+		// V2 兼容：member_name 或 name
+		if (!NodeObj->TryGetStringField(TEXT("member_name"), NodeName))
+		{
+			NodeObj->TryGetStringField(TEXT("name"), NodeName);
+		}
+		NodeObj->TryGetStringField(TEXT("target_class"), TargetClassStr);
+		
+		// V2: 获取 pin_defaults
+		const TSharedPtr<FJsonObject>* PinDefaultsPtr = nullptr;
+		NodeObj->TryGetObjectField(TEXT("pin_defaults"), PinDefaultsPtr);
+		
+		if (NodeId.IsEmpty())
+		{
+			NodeId = FString::Printf(TEXT("node_%d"), i);
+		}
+		if (NodeType.IsEmpty())
+		{
+			Errors.Add(FString::Printf(TEXT("nodes[%d] '%s': missing type/class"), i, *NodeId));
+			continue;
+		}
+		if (NodeName.IsEmpty())
+		{
+			NodeName = TEXT("Default");
+		}
+		
+		// 解析位置（可选）
+		int32 PosX = NextPosX;
+		int32 PosY = NextPosY;
+		const TSharedPtr<FJsonObject>* PosObjPtr = nullptr;
+		if (NodeObj->TryGetObjectField(TEXT("position"), PosObjPtr) && PosObjPtr && (*PosObjPtr).IsValid())
+		{
+			(*PosObjPtr)->TryGetNumberField(TEXT("x"), PosX);
+			(*PosObjPtr)->TryGetNumberField(TEXT("y"), PosY);
+		}
+		else if (bAutoLayout)
+		{
+			// 自动布局：按行排列
+			NextPosX += StepX;
+			if (NextPosX > StepX * 4)
+			{
+				NextPosX = 0;
+				NextPosY += StepY;
+			}
+		}
+		
+		// 创建节点
+		FString CreateError;
+		UEdGraphNode* NewNode = UAL_CreateNodeInternal(
+			Blueprint, Graph, NodeType, NodeName, TargetClassStr, PosX, PosY, CreateError
+		);
+		
+		if (!NewNode)
+		{
+			Errors.Add(FString::Printf(TEXT("nodes[%d] '%s': %s"), i, *NodeId, *CreateError));
+			continue;
+		}
+		
+		// ===== V2: 应用 pin_defaults =====
+		if (PinDefaultsPtr && (*PinDefaultsPtr).IsValid())
+		{
+			for (const auto& Pair : (*PinDefaultsPtr)->Values)
+			{
+				const FString& PinName = Pair.Key;
+				FString PinValue;
+				if (Pair.Value.IsValid() && Pair.Value->TryGetString(PinValue))
+				{
+					// 查找引脚并设置默认值
+					if (UEdGraphPin* Pin = UAL_FindPinByName(NewNode, PinName))
+					{
+						Pin->DefaultValue = PinValue;
+					}
+					else
+					{
+						Errors.Add(FString::Printf(TEXT("nodes[%d] '%s': pin_defaults - pin '%s' not found"), i, *NodeId, *PinName));
+					}
+				}
+			}
+		}
+		
+		// 记录到映射表
+		NodeIdMap.Add(NodeId, NewNode);
+		
+		// 记录创建结果
+		TSharedPtr<FJsonObject> NodeInfo = MakeShared<FJsonObject>();
+		NodeInfo->SetStringField(TEXT("id"), NodeId);
+		NodeInfo->SetStringField(TEXT("node_id"), UAL_GuidToString(NewNode->NodeGuid));
+		NodeInfo->SetStringField(TEXT("class"), NewNode->GetClass()->GetName());
+		NodeInfo->SetArrayField(TEXT("pins"), UAL_BuildPinsJson(NewNode));
+		CreatedNodesInfo.Add(MakeShared<FJsonValueObject>(NodeInfo));
+	}
+
+	// ===== 7. 创建连线 =====
+	int32 ConnectionCount = 0;
+	if (ConnectionsArray && ConnectionsArray->Num() > 0)
+	{
+		const UEdGraphSchema_K2* K2Schema = Cast<UEdGraphSchema_K2>(Graph->GetSchema());
+		
+		for (int32 i = 0; i < ConnectionsArray->Num(); ++i)
+		{
+			const TSharedPtr<FJsonValue>& ConnVal = (*ConnectionsArray)[i];
+			if (!ConnVal.IsValid()) continue;
+			
+			// 支持两种格式：
+			// 1. 数组 ["nodeA.PinName", "nodeB.PinName"]
+			// 2. 对象 { "from": "nodeA.PinName", "to": "nodeB.PinName" }
+			FString FromStr, ToStr;
+			
+			const TArray<TSharedPtr<FJsonValue>>* ConnArr = nullptr;
+			const TSharedPtr<FJsonObject>* ConnObjPtr = nullptr;
+			
+			if (ConnVal->TryGetArray(ConnArr) && ConnArr && ConnArr->Num() >= 2)
+			{
+				FromStr = (*ConnArr)[0]->AsString();
+				ToStr = (*ConnArr)[1]->AsString();
+			}
+			else if (ConnVal->TryGetObject(ConnObjPtr) && ConnObjPtr && (*ConnObjPtr).IsValid())
+			{
+				(*ConnObjPtr)->TryGetStringField(TEXT("from"), FromStr);
+				(*ConnObjPtr)->TryGetStringField(TEXT("to"), ToStr);
+			}
+			
+			if (FromStr.IsEmpty() || ToStr.IsEmpty())
+			{
+				Errors.Add(FString::Printf(TEXT("connections[%d]: invalid format"), i));
+				continue;
+			}
+			
+			// 解析 "nodeId.pinName" 格式
+			FString FromNodeId, FromPinName, ToNodeId, ToPinName;
+			if (!FromStr.Split(TEXT("."), &FromNodeId, &FromPinName) || !ToStr.Split(TEXT("."), &ToNodeId, &ToPinName))
+			{
+				Errors.Add(FString::Printf(TEXT("connections[%d]: invalid pin path format"), i));
+				continue;
+			}
+			
+			// 查找节点
+			UEdGraphNode** FromNodePtr = NodeIdMap.Find(FromNodeId);
+			UEdGraphNode** ToNodePtr = NodeIdMap.Find(ToNodeId);
+			
+			if (!FromNodePtr || !*FromNodePtr)
+			{
+				Errors.Add(FString::Printf(TEXT("connections[%d]: source node '%s' not found"), i, *FromNodeId));
+				continue;
+			}
+			if (!ToNodePtr || !*ToNodePtr)
+			{
+				Errors.Add(FString::Printf(TEXT("connections[%d]: target node '%s' not found"), i, *ToNodeId));
+				continue;
+			}
+			
+			// 查找引脚
+			UEdGraphPin* FromPin = UAL_FindPinByName(*FromNodePtr, FromPinName);
+			UEdGraphPin* ToPin = UAL_FindPinByName(*ToNodePtr, ToPinName);
+			
+			if (!FromPin)
+			{
+				Errors.Add(FString::Printf(TEXT("connections[%d]: pin '%s' not found on '%s'"), i, *FromPinName, *FromNodeId));
+				continue;
+			}
+			if (!ToPin)
+			{
+				Errors.Add(FString::Printf(TEXT("connections[%d]: pin '%s' not found on '%s'"), i, *ToPinName, *ToNodeId));
+				continue;
+			}
+			
+			// 创建连接
+			if (K2Schema && K2Schema->TryCreateConnection(FromPin, ToPin))
+			{
+				ConnectionCount++;
+			}
+			else
+			{
+				Errors.Add(FString::Printf(TEXT("connections[%d]: failed to connect '%s' -> '%s'"), i, *FromStr, *ToStr));
+			}
+		}
+	}
+
+	// ===== 8. 可选：编译蓝图 =====
+	if (bCompile)
+	{
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+		FKismetEditorUtilities::CompileBlueprint(Blueprint);
+	}
+	else
+	{
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+	}
+	
+	// ===== 返回结果 =====
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("ok"), Errors.Num() == 0);
+	Result->SetStringField(TEXT("blueprint_path"), ResolvedPath);
+	Result->SetStringField(TEXT("graph_name"), Graph->GetName());
+	Result->SetNumberField(TEXT("created_count"), CreatedNodesInfo.Num());
+	Result->SetNumberField(TEXT("connection_count"), ConnectionCount);
+	Result->SetBoolField(TEXT("compiled"), bCompile);
+	Result->SetArrayField(TEXT("nodes"), CreatedNodesInfo);
+	
+	if (Errors.Num() > 0)
+	{
+		TArray<TSharedPtr<FJsonValue>> ErrorsArray;
+		for (const FString& Err : Errors)
+		{
+			ErrorsArray.Add(MakeShared<FJsonValueString>(Err));
+		}
+		Result->SetArrayField(TEXT("errors"), ErrorsArray);
+	}
 	
 	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
 }
