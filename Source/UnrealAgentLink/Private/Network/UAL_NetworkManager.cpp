@@ -3,6 +3,8 @@
 #include "Async/Async.h"
 #include "WebSocketsModule.h"
 #include "HAL/PlatformProcess.h"
+#include "Serialization/JsonWriter.h"
+#include "Serialization/JsonSerializer.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogUALNetwork, Log, All);
 
@@ -19,12 +21,14 @@ void FUAL_NetworkManager::Init(const FString& ServerUrl)
 
 	Connect();
 	StartReconnectTimer();
+	StartHeartbeatTimer();
 }
 
 void FUAL_NetworkManager::Shutdown()
 {
 	bWantsReconnect = false;
 	StopReconnectTimer();
+	StopHeartbeatTimer();
 	CleanupSocket();
 }
 
@@ -125,6 +129,52 @@ bool FUAL_NetworkManager::TickReconnect(float DeltaTime)
 		UE_LOG(LogUALNetwork, Verbose, TEXT("Reconnect ticker triggering connect"));
 		Connect();
 	}
+	return true; // 继续运行
+}
+
+void FUAL_NetworkManager::StartHeartbeatTimer()
+{
+	if (HeartbeatTickerHandle.IsValid())
+	{
+		return;
+	}
+
+	// 每10秒发送一次心跳（前端配置是15秒检查间隔，45秒超时，所以10秒发送一次足够）
+	HeartbeatTickerHandle = UAL_CORE_TICKER.AddTicker(FTickerDelegateType::CreateRaw(this, &FUAL_NetworkManager::TickHeartbeat), 10.0f);
+}
+
+void FUAL_NetworkManager::StopHeartbeatTimer()
+{
+	if (HeartbeatTickerHandle.IsValid())
+	{
+		UAL_CORE_TICKER.RemoveTicker(HeartbeatTickerHandle);
+		HeartbeatTickerHandle.Reset();
+	}
+}
+
+bool FUAL_NetworkManager::TickHeartbeat(float DeltaTime)
+{
+	if (!bWantsReconnect || !IsConnected())
+	{
+		return false; // 停止 ticker
+	}
+
+	// 发送心跳消息
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("ver"), TEXT("1.0"));
+	Root->SetStringField(TEXT("type"), TEXT("evt"));
+	Root->SetStringField(TEXT("method"), TEXT("system.heartbeat"));
+	
+	// payload可以为空，或者包含一些基本信息
+	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+	Root->SetObjectField(TEXT("payload"), Payload);
+
+	FString OutJson;
+	const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutJson);
+	FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
+
+	SendMessage(OutJson);
+
 	return true; // 继续运行
 }
 

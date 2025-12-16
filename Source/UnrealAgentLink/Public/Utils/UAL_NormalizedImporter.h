@@ -31,6 +31,12 @@ struct FUALImportTargetInfo
 
     /** 规范化后的资产名称 */
     FString NormalizedAssetName;
+
+    /** 
+     * 源文件夹名称（用于语义后缀）
+     * 例如：对于路径 /Game/VikingPack/Textures/T_Wood.uasset，这里存储 "VikingPack"
+     */
+    FString SourceFolderName;
 };
 
 /**
@@ -80,15 +86,22 @@ struct FUALImportRuleSet
     /** 是否使用 PascalCase 命名 */
     bool bUsePascalCase = true;
 
-    /** 冲突时是否自动重命名 */
-    bool bAutoRenameOnConflict = true;
+    	/** 冲突时是否自动重命名 */
+	bool bAutoRenameOnConflict = true;
 
-    /** 
-     * 是否保持原路径结构（推荐用于 uasset 导入）
-     * true: 保持原始的 /Game/xxx 目录结构，只复制到 Content 目录
-     * false: 使用规范化的目录结构和命名
-     */
-    bool bPreserveOriginalPath = false;
+	/**
+	 * 冲突时是否使用语义后缀
+	 * true: 使用源文件夹名称作为后缀（如 T_Wood_VikingPack）
+	 * false: 使用简单的数字后缀（如 T_Wood_01）
+	 */
+	bool bUseSemanticSuffix = true;
+
+	/** 
+	 * 是否保持原路径结构
+	 * true: 保持原始的 /Game/xxx 目录结构，只复制到 Content 目录
+	 * false: 使用规范化的目录结构和命名（先复制到原位置，然后用 RenameAssets 移动）
+	 */
+	bool bPreserveOriginalPath = false;
 
     /**
      * 初始化默认规则

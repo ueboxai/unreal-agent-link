@@ -41,8 +41,11 @@ FString FUALNormalizedImporter::ToPascalCase(const FString& Input)
     {
         if (Word.Len() > 0)
         {
-            // 首字母大写，其余小写
-            Result += Word.Left(1).ToUpper() + Word.Mid(1).ToLower();
+            // 保持原有大小写，只确保首字母大写
+            // 例如: "BP" -> "BP", "easyFog" -> "EasyFog", "TEXTURE" -> "TEXTURE"
+            FString FirstChar = Word.Left(1).ToUpper();
+            FString Rest = Word.Mid(1);  // 保持原样，不强制小写
+            Result += FirstChar + Rest;
         }
     }
     
@@ -154,7 +157,68 @@ bool FUALNormalizedImporter::GenerateTargetInfo(
         
         if (AssetClass.IsEmpty())
         {
-            AssetClass = (Extension == TEXT("umap")) ? TEXT("World") : TEXT("Unknown");
+            // 启发式检测：基于文件名前缀推断资产类型
+            // 参考 UE5 样式指南的命名规范
+            FString UpperName = OriginalName.ToUpper();
+            
+            if (UpperName.StartsWith(TEXT("BP_")) || UpperName.Contains(TEXT("_BP_")))
+            {
+                AssetClass = TEXT("Blueprint");
+            }
+            else if (UpperName.StartsWith(TEXT("ABP_")))
+            {
+                AssetClass = TEXT("AnimBlueprint");
+            }
+            else if (UpperName.StartsWith(TEXT("SM_")))
+            {
+                AssetClass = TEXT("StaticMesh");
+            }
+            else if (UpperName.StartsWith(TEXT("SK_")))
+            {
+                AssetClass = TEXT("SkeletalMesh");
+            }
+            else if (UpperName.StartsWith(TEXT("M_")))
+            {
+                AssetClass = TEXT("Material");
+            }
+            else if (UpperName.StartsWith(TEXT("MI_")))
+            {
+                AssetClass = TEXT("MaterialInstanceConstant");
+            }
+            else if (UpperName.StartsWith(TEXT("T_")))
+            {
+                AssetClass = TEXT("Texture2D");
+            }
+            else if (UpperName.StartsWith(TEXT("A_")))
+            {
+                AssetClass = TEXT("SoundWave");
+            }
+            else if (UpperName.StartsWith(TEXT("AM_")))
+            {
+                AssetClass = TEXT("AnimMontage");
+            }
+            else if (UpperName.StartsWith(TEXT("NS_")))
+            {
+                AssetClass = TEXT("NiagaraSystem");
+            }
+            else if (UpperName.StartsWith(TEXT("PS_")))
+            {
+                AssetClass = TEXT("ParticleSystem");
+            }
+            else if (Extension == TEXT("umap"))
+            {
+                AssetClass = TEXT("World");
+            }
+            else
+            {
+                AssetClass = TEXT("Unknown");
+            }
+            
+            if (AssetClass != TEXT("Unknown"))
+            {
+                UE_LOG(LogNormalizedImport, Log, TEXT("启发式识别资产类型: %s -> %s (基于文件名)"), 
+                    *OriginalName, *AssetClass);
+            }
         }
         
         // 尝试从路径推断原包名
@@ -247,6 +311,63 @@ bool FUALNormalizedImporter::GenerateTargetInfo(
     }
     
     // ========================================
+    // 提取源文件夹名称（用于语义后缀）
+    // 例如: /Game/VikingPack/Textures/T_Wood -> "VikingPack"
+    // ========================================
+    FString SourceFolderName;
+    if (!OldPackageName.IsNone())
+    {
+        FString PackagePath = OldPackageName.ToString();
+        // 移除 /Game/ 前缀
+        if (PackagePath.StartsWith(TEXT("/Game/")))
+        {
+            FString RelPath = PackagePath.RightChop(6); // 移除 "/Game/"
+            // 获取第一个路径段（即源文件夹名称）
+            int32 SlashIdx;
+            if (RelPath.FindChar(TEXT('/'), SlashIdx))
+            {
+                SourceFolderName = RelPath.Left(SlashIdx);
+            }
+            else
+            {
+                // 没有子目录，使用整个路径（不含文件名）
+                SourceFolderName = FPaths::GetBaseFilename(PackagePath);
+            }
+        }
+    }
+    
+    // 如果无法从包名提取，尝试从源文件路径提取
+    if (SourceFolderName.IsEmpty())
+    {
+        // 尝试从源文件路径提取
+        // 例如: H:/Assets/VikingPack/Textures/T_Wood.uasset -> "VikingPack"
+        FString Dir = FPaths::GetPath(SourceFilePath);
+        Dir.ReplaceInline(TEXT("\\"), TEXT("/"));
+        
+        // 尝试找到 /Game/ 或 /Content/ 并提取其后的第一个文件夹
+        int32 GameIdx = Dir.Find(TEXT("/Game/"), ESearchCase::IgnoreCase);
+        if (GameIdx != INDEX_NONE)
+        {
+            FString RelPath = Dir.Mid(GameIdx + 6); // 跳过 "/Game/"
+            int32 SlashIdx;
+            if (RelPath.FindChar(TEXT('/'), SlashIdx))
+            {
+                SourceFolderName = RelPath.Left(SlashIdx);
+            }
+        }
+        
+        // 如果仍然为空，使用上上级目录名
+        if (SourceFolderName.IsEmpty())
+        {
+            FString ParentDir = FPaths::GetPath(Dir);
+            SourceFolderName = FPaths::GetBaseFilename(ParentDir);
+        }
+    }
+    
+    UE_LOG(LogNormalizedImport, Log, TEXT("源文件夹名称: %s (从 %s)"), 
+        *SourceFolderName, *OldPackageName.ToString());
+    
+    // ========================================
     // 确定新包名和目标路径
     // ========================================
     
@@ -277,14 +398,33 @@ bool FUALNormalizedImporter::GenerateTargetInfo(
         // 确定名称前缀
         FString Prefix = RuleSet.ClassToPrefix.FindRef(AssetClass);
         
+        // 检测原始名称是否已经有正确的前缀（避免重复添加）
+        // 例如：BP_EasyFog 已经有 BP_ 前缀，不需要再添加
+        bool bAlreadyHasPrefix = false;
+        if (!Prefix.IsEmpty())
+        {
+            FString UpperOriginalName = OriginalName.ToUpper();
+            FString UpperPrefix = Prefix.ToUpper();
+            if (UpperOriginalName.StartsWith(UpperPrefix))
+            {
+                bAlreadyHasPrefix = true;
+                UE_LOG(LogNormalizedImport, Log, TEXT("资产 '%s' 已有前缀 '%s'，跳过添加"), 
+                    *OriginalName, *Prefix);
+            }
+        }
+        
         // 生成规范化名称
         if (RuleSet.bUsePascalCase)
         {
-            NormalizedName = Prefix + ToPascalCase(OriginalName);
+            FString PascalName = ToPascalCase(OriginalName);
+            // 如果已有前缀，ToPascalCase 会去掉分隔符但保留前缀内容
+            // 例如：BP_EasyFog -> BPEasyFog
+            // 此时不需要再添加前缀
+            NormalizedName = bAlreadyHasPrefix ? PascalName : (Prefix + PascalName);
         }
         else
         {
-            NormalizedName = Prefix + OriginalName;
+            NormalizedName = bAlreadyHasPrefix ? OriginalName : (Prefix + OriginalName);
         }
         
         // 构建新包名
@@ -318,6 +458,7 @@ bool FUALNormalizedImporter::GenerateTargetInfo(
     OutTargetInfo.AssetClass = AssetClass;
     OutTargetInfo.OriginalAssetName = OriginalName;
     OutTargetInfo.NormalizedAssetName = NormalizedName;
+    OutTargetInfo.SourceFolderName = SourceFolderName;
     
     return true;
 }
@@ -565,17 +706,6 @@ bool FUALNormalizedImporter::ExecuteNormalizedImport(
         {
             OutSession.TargetInfos.Add(TargetInfo);
 
-            // 如果有旧包名，添加到重定向映射
-            if (!TargetInfo.OldPackageName.IsNone())
-            {
-                OutSession.RedirectMap.Add(TargetInfo.OldPackageName, TargetInfo.NewPackageName);
-                
-                // 构建软路径重定向
-                FSoftObjectPath OldPath(TargetInfo.OldPackageName.ToString());
-                FSoftObjectPath NewPath(TargetInfo.NewPackageName.ToString());
-                OutSession.SoftPathRedirectMap.Add(OldPath, NewPath);
-            }
-
             UE_LOG(LogNormalizedImport, Log, TEXT("  %s -> %s (%s)"),
                 *TargetInfo.OriginalAssetName,
                 *TargetInfo.NewPackageName.ToString(),
@@ -584,6 +714,95 @@ bool FUALNormalizedImporter::ExecuteNormalizedImport(
         else
         {
             OutSession.Errors.Add(FString::Printf(TEXT("无法生成目标信息: %s"), *SourceFile));
+        }
+    }
+
+    // ============================================================================
+    // 步骤 1.5: 检测冲突并使用语义后缀重命名
+    // ============================================================================
+    if (RuleSet.bAutoRenameOnConflict)
+    {
+        TMap<FName, int32> PackageNameCount;  // 统计每个目标包名的出现次数
+        TMap<FName, TArray<int32>> PackageNameIndices;  // 记录使用相同包名的 TargetInfo 索引
+        
+        // 第一遍：统计重复
+        for (int32 i = 0; i < OutSession.TargetInfos.Num(); ++i)
+        {
+            FName NewPkg = OutSession.TargetInfos[i].NewPackageName;
+            int32& Count = PackageNameCount.FindOrAdd(NewPkg, 0);
+            Count++;
+            PackageNameIndices.FindOrAdd(NewPkg).Add(i);
+        }
+        
+        // 第二遍：对重复的进行重命名
+        for (const auto& Pair : PackageNameIndices)
+        {
+            if (Pair.Value.Num() <= 1)
+            {
+                continue;  // 没有冲突
+            }
+            
+            UE_LOG(LogNormalizedImport, Log, TEXT("检测到重复包名 %s，共 %d 个资产"), 
+                *Pair.Key.ToString(), Pair.Value.Num());
+            
+            // 对有冲突的资产进行重命名
+            for (int32 Idx : Pair.Value)
+            {
+                FUALImportTargetInfo& Info = OutSession.TargetInfos[Idx];
+                
+                FString NewName;
+                FString Extension = FPaths::GetExtension(Info.TargetFilePath);
+                
+                // 使用语义后缀（源文件夹名称）
+                if (RuleSet.bUseSemanticSuffix && !Info.SourceFolderName.IsEmpty())
+                {
+                    // 语义后缀格式：AssetName_SourceFolderName
+                    // 例如：T_Wood_VikingPack
+                    NewName = Info.NormalizedAssetName + TEXT("_") + Info.SourceFolderName;
+                    
+                    UE_LOG(LogNormalizedImport, Log, TEXT("  语义重命名: %s -> %s (来源: %s)"),
+                        *Info.NormalizedAssetName, *NewName, *Info.SourceFolderName);
+                }
+                else
+                {
+                    // 回退到数字后缀
+                    static int32 NumericCounter = 1;
+                    NewName = FString::Printf(TEXT("%s_%02d"), *Info.NormalizedAssetName, NumericCounter++);
+                    
+                    UE_LOG(LogNormalizedImport, Log, TEXT("  数字重命名: %s -> %s"),
+                        *Info.NormalizedAssetName, *NewName);
+                }
+                
+                // 更新目标信息
+                FString OldPackagePath = Info.NewPackageName.ToString();
+                FString PackageDir = FPaths::GetPath(OldPackagePath);
+                FString NewPackagePath = FPaths::Combine(PackageDir, NewName);
+                NewPackagePath.ReplaceInline(TEXT("\\"), TEXT("/"));
+                
+                Info.NormalizedAssetName = NewName;
+                Info.NewPackageName = FName(*NewPackagePath);
+                
+                // 更新目标文件路径
+                FString TargetDir = FPaths::GetPath(Info.TargetFilePath);
+                Info.TargetFilePath = FPaths::Combine(TargetDir, NewName) + TEXT(".") + Extension;
+            }
+        }
+    }
+    
+    // ============================================================================
+    // 步骤 1.6: 建立重定向映射
+    // ============================================================================
+    for (const FUALImportTargetInfo& TargetInfo : OutSession.TargetInfos)
+    {
+        // 如果有旧包名，添加到重定向映射
+        if (!TargetInfo.OldPackageName.IsNone())
+        {
+            OutSession.RedirectMap.Add(TargetInfo.OldPackageName, TargetInfo.NewPackageName);
+            
+            // 构建软路径重定向
+            FSoftObjectPath OldPath(TargetInfo.OldPackageName.ToString());
+            FSoftObjectPath NewPath(TargetInfo.NewPackageName.ToString());
+            OutSession.SoftPathRedirectMap.Add(OldPath, NewPath);
         }
     }
 
@@ -627,11 +846,43 @@ bool FUALNormalizedImporter::ExecuteNormalizedImport(
 bool FUALNormalizedImporter::CopyFilesToTarget(FUALNormalizedImportSession& Session)
 {
     IFileManager& FileManager = IFileManager::Get();
+    FString ContentDir = FPaths::ProjectContentDir();
 
     for (FUALImportTargetInfo& TargetInfo : Session.TargetInfos)
     {
+        // 决定复制目标：
+        // - 如果 OldPackageName == NewPackageName（保持原路径），直接复制到 TargetFilePath
+        // - 如果路径不同（需要规范化），先复制到原路径位置，然后在 LoadAndFixReferences 中用 RenameAssets 移动
+        
+        FString ActualTargetPath;
+        bool bNeedRename = (TargetInfo.OldPackageName != TargetInfo.NewPackageName) && !TargetInfo.OldPackageName.IsNone();
+        
+        if (bNeedRename)
+        {
+            // 先复制到原路径位置，确保内部包名与外部路径匹配
+            FString OldRelativePath = TargetInfo.OldPackageName.ToString();
+            OldRelativePath.RemoveFromStart(TEXT("/Game/"));
+            
+            FString Extension = FPaths::GetExtension(TargetInfo.SourceFilePath);
+            ActualTargetPath = FPaths::Combine(ContentDir, OldRelativePath);
+            ActualTargetPath += TEXT(".") + Extension;
+            
+            // 记录实际复制位置，供后续加载使用
+            TargetInfo.TargetFilePath = ActualTargetPath;  // 更新为实际位置
+            
+            UE_LOG(LogNormalizedImport, Log, TEXT("规范化导入策略: 先复制到原位置"));
+            UE_LOG(LogNormalizedImport, Log, TEXT("  源: %s"), *TargetInfo.SourceFilePath);
+            UE_LOG(LogNormalizedImport, Log, TEXT("  临时目标: %s"), *ActualTargetPath);
+            UE_LOG(LogNormalizedImport, Log, TEXT("  最终目标: /Game/... (将通过 RenameAssets 移动)"));
+        }
+        else
+        {
+            // 保持原路径或无法推断原路径，直接复制到目标位置
+            ActualTargetPath = TargetInfo.TargetFilePath;
+        }
+        
         // 确保目标目录存在
-        FString TargetDir = FPaths::GetPath(TargetInfo.TargetFilePath);
+        FString TargetDir = FPaths::GetPath(ActualTargetPath);
         if (!FileManager.DirectoryExists(*TargetDir))
         {
             if (!FileManager.MakeDirectory(*TargetDir, true))
@@ -643,24 +894,42 @@ bool FUALNormalizedImporter::CopyFilesToTarget(FUALNormalizedImportSession& Sess
         }
 
         // 检查目标文件是否已存在
-        if (FileManager.FileExists(*TargetInfo.TargetFilePath))
+        if (FileManager.FileExists(*ActualTargetPath))
         {
-            Session.Warnings.Add(FString::Printf(TEXT("文件已存在，将跳过: %s"), *TargetInfo.TargetFilePath));
-            Session.SuccessCount++; // 视为成功（已存在）
-            continue;
+            if (bNeedRename)
+            {
+                // 原位置的文件可能是上次未完成的导入留下的
+                // 删除旧文件，用新的源文件覆盖
+                UE_LOG(LogNormalizedImport, Log, TEXT("原位置已存在文件，将覆盖: %s"), *ActualTargetPath);
+                
+                if (!FileManager.Delete(*ActualTargetPath))
+                {
+                    Session.Warnings.Add(FString::Printf(TEXT("无法删除旧文件: %s，将尝试使用现有资产"), *ActualTargetPath));
+                    Session.SuccessCount++;
+                    continue;
+                }
+                // 继续执行复制操作
+            }
+            else
+            {
+                Session.Warnings.Add(FString::Printf(TEXT("文件已存在，将跳过: %s"), *ActualTargetPath));
+                Session.SuccessCount++; // 视为成功（已存在）
+                continue;
+            }
         }
 
         // 复制文件
-        uint32 CopyResult = FileManager.Copy(*TargetInfo.TargetFilePath, *TargetInfo.SourceFilePath, true, true);
+        uint32 CopyResult = FileManager.Copy(*ActualTargetPath, *TargetInfo.SourceFilePath, true, true);
         if (CopyResult == COPY_OK)
         {
-            UE_LOG(LogNormalizedImport, Log, TEXT("复制成功: %s"), *TargetInfo.NormalizedAssetName);
+            UE_LOG(LogNormalizedImport, Log, TEXT("复制成功: %s -> %s"), 
+                *TargetInfo.OriginalAssetName, *ActualTargetPath);
             Session.SuccessCount++;
         }
         else
         {
             Session.Errors.Add(FString::Printf(TEXT("复制失败 (%d): %s -> %s"),
-                CopyResult, *TargetInfo.SourceFilePath, *TargetInfo.TargetFilePath));
+                CopyResult, *TargetInfo.SourceFilePath, *ActualTargetPath));
             Session.FailedCount++;
         }
     }
@@ -751,46 +1020,107 @@ bool FUALNormalizedImporter::LoadAndFixReferences(FUALNormalizedImportSession& S
 #if WITH_EDITOR
     UE_LOG(LogNormalizedImport, Log, TEXT("开始加载包并修复引用"));
 
-    // 加载所有新导入的包
-    TMap<FName, UPackage*> LoadedPackages;
-    
-    for (const FUALImportTargetInfo& TargetInfo : Session.TargetInfos)
+    // 获取 AssetTools
+    IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
+    FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+    IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+
+    // 收集需要重命名的资产
+    TArray<FAssetRenameData> RenameData;
+
+    for (FUALImportTargetInfo& TargetInfo : Session.TargetInfos)
     {
-        FString PackageName = TargetInfo.NewPackageName.ToString();
+        // 加载资产（此时文件在原路径位置，内部包名与外部路径一致）
+        FString OldPackageName = TargetInfo.OldPackageName.ToString();
+        FString NewPackageName = TargetInfo.NewPackageName.ToString();
         
-        // 尝试加载包
-        UPackage* Package = LoadPackage(nullptr, *PackageName, LOAD_None);
+        // 使用 OldPackageName 加载（因为文件当前在原位置）
+        UPackage* Package = LoadPackage(nullptr, *OldPackageName, LOAD_None);
         if (Package)
         {
-            LoadedPackages.Add(TargetInfo.NewPackageName, Package);
-            Session.PackagesToSave.Add(Package);
+            UE_LOG(LogNormalizedImport, Log, TEXT("成功加载包: %s"), *OldPackageName);
             
-            // 强制标记为 Dirty，确保 SavePackage 时会根据当前的重定向更新 ImportMap
-            Package->SetDirtyFlag(true);
-            
-            UE_LOG(LogNormalizedImport, Log, TEXT("成功加载包: %s"), *PackageName);
+            // 如果需要移动到新位置
+            if (TargetInfo.OldPackageName != TargetInfo.NewPackageName)
+            {
+                // 获取包中的资产
+                TArray<UObject*> ObjectsInPackage;
+                GetObjectsWithOuter(Package, ObjectsInPackage, false);
+                
+                // 找到主资产（与包名同名的资产）
+                UObject* MainAsset = nullptr;
+                for (UObject* Obj : ObjectsInPackage)
+                {
+                    if (Obj && Obj->GetName() == FPaths::GetBaseFilename(OldPackageName))
+                    {
+                        MainAsset = Obj;
+                        break;
+                    }
+                }
+                
+                // 如果找不到同名资产，取第一个非 Class 资产
+                if (!MainAsset)
+                {
+                    for (UObject* Obj : ObjectsInPackage)
+                    {
+                        if (Obj && !Obj->IsA<UClass>())
+                        {
+                            MainAsset = Obj;
+                            break;
+                        }
+                    }
+                }
+                
+                if (MainAsset)
+                {
+                    // 解析新路径
+                    FString NewPath = FPaths::GetPath(NewPackageName);
+                    FString NewAssetName = TargetInfo.NormalizedAssetName;
+                    
+                    UE_LOG(LogNormalizedImport, Log, TEXT("准备移动资产: %s -> %s/%s"), 
+                        *MainAsset->GetPathName(), *NewPath, *NewAssetName);
+                    
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+                    RenameData.Add(FAssetRenameData(MainAsset->GetPathName(), NewPath, NewAssetName));
+#else
+                    RenameData.Add(FAssetRenameData(MainAsset, NewPath, NewAssetName));
+#endif
+                    Session.PackagesToSave.Add(Package);
+                }
+                else
+                {
+                    Session.Warnings.Add(FString::Printf(TEXT("未找到主资产: %s"), *OldPackageName));
+                }
+            }
+            else
+            {
+                // 保持原路径，直接加入保存列表
+                Session.PackagesToSave.Add(Package);
+            }
         }
         else
         {
-            Session.Warnings.Add(FString::Printf(TEXT("无法加载包: %s"), *PackageName));
+            Session.Warnings.Add(FString::Printf(TEXT("无法加载包: %s"), *OldPackageName));
+        }
+    }
+
+    // 执行批量重命名
+    if (RenameData.Num() > 0)
+    {
+        UE_LOG(LogNormalizedImport, Log, TEXT("执行资产移动，共 %d 个"), RenameData.Num());
+        bool bSuccess = AssetTools.RenameAssets(RenameData);
+        
+        if (!bSuccess)
+        {
+            Session.Warnings.Add(TEXT("部分资产移动失败，请检查 UE 输出日志"));
         }
     }
 
     // 修复软引用
-    if (Session.SoftPathRedirectMap.Num() > 0)
+    if (Session.SoftPathRedirectMap.Num() > 0 && Session.PackagesToSave.Num() > 0)
     {
         UE_LOG(LogNormalizedImport, Log, TEXT("修复软引用，共 %d 个映射"), Session.SoftPathRedirectMap.Num());
-
-        IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
-
-        // RenameReferencingSoftObjectPaths 需要 TMap<FSoftObjectPath, FSoftObjectPath> 作为参数
-        // 我们已有的 Session.SoftPathRedirectMap 正好是这个类型
-        if (Session.PackagesToSave.Num() > 0)
-        {
-            // 注意：RenameReferencingSoftObjectPaths 在 UE5 中的签名是：
-            // void RenameReferencingSoftObjectPaths(const TArray<UPackage*>, const TMap<FSoftObjectPath, FSoftObjectPath>&)
-            AssetTools.RenameReferencingSoftObjectPaths(Session.PackagesToSave, Session.SoftPathRedirectMap);
-        }
+        AssetTools.RenameReferencingSoftObjectPaths(Session.PackagesToSave, Session.SoftPathRedirectMap);
     }
 
     return true;

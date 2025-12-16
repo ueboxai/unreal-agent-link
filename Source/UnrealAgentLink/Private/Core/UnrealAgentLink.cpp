@@ -4,6 +4,9 @@
 #include "UnrealAgentLinkStyle.h"
 #include "UnrealAgentLinkCommands.h"
 #include "Misc/MessageDialog.h"
+#include "Misc/App.h"
+#include "Misc/Paths.h"
+#include "HAL/PlatformProcess.h"
 #include "ToolMenus.h"
 #include "UAL_NetworkManager.h"
 #include "UAL_CommandHandler.h"
@@ -62,6 +65,29 @@ void FUnrealAgentLinkModule::ShutdownModule()
 {
 	// This function may be called during shutdown to clean up your module.  For modules that support dynamic reloading,
 	// we call this function before unloading the module.
+
+	// 在关闭连接前发送项目关闭事件
+	if (FUAL_NetworkManager::Get().IsConnected())
+	{
+		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+		Root->SetStringField(TEXT("ver"), TEXT("1.0"));
+		Root->SetStringField(TEXT("type"), TEXT("evt"));
+		Root->SetStringField(TEXT("method"), TEXT("project.closed"));
+		
+		TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
+		Payload->SetStringField(TEXT("projectName"), FApp::GetProjectName());
+		Payload->SetStringField(TEXT("projectPath"), FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath()));
+		Root->SetObjectField(TEXT("payload"), Payload);
+
+		FString OutJson;
+		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutJson);
+		FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
+
+		FUAL_NetworkManager::Get().SendMessage(OutJson);
+		
+		// 等待一小段时间确保消息发送完成
+		FPlatformProcess::Sleep(0.1f);
+	}
 
 	UToolMenus::UnRegisterStartupCallback(this);
 

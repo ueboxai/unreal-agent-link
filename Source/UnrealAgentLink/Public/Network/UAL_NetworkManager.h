@@ -50,6 +50,10 @@ private:
 	void StopReconnectTimer();
 	bool TickReconnect(float DeltaTime);
 
+	void StartHeartbeatTimer();
+	void StopHeartbeatTimer();
+	bool TickHeartbeat(float DeltaTime);
+
 	void HandleOnMessage(const FString& Data);
 	void HandleOnConnected();
 	void HandleOnClosed(int32 StatusCode, const FString& Reason, bool bWasClean);
@@ -61,6 +65,7 @@ private:
 	FString TargetUrl;
 
 	FTickerHandleType ReconnectTickerHandle;
+	FTickerHandleType HeartbeatTickerHandle;
 	bool bIsConnecting = false;
 	bool bWantsReconnect = false;
 

@@ -30,4 +30,7 @@ public:
 
 	// system.manage_plugin - 查询或修改插件状态
 	static void Handle_ManagePlugin(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
+	// system.get_project_info - 获取项目信息(路径、Content目录等)
+	static void Handle_GetProjectInfo(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 };

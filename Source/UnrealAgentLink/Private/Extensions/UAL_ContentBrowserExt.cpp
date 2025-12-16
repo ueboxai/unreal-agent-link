@@ -13,10 +13,19 @@
 #include "Misc/App.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/EngineVersion.h"
+#include "Misc/Base64.h"
 #include "AssetData.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Engine/World.h"
 #include "Internationalization/Internationalization.h"
 #include "Internationalization/Culture.h"
+
+// 缩略图相关
+#include "ObjectTools.h"
+#include "ThumbnailRendering/ThumbnailManager.h"
+#include "IImageWrapper.h"
+#include "IImageWrapperModule.h"
+#include "Engine/Texture2D.h"
 
 #define LOCTEXT_NAMESPACE "FUAL_ContentBrowserExt"
 
@@ -37,6 +46,160 @@ namespace
 		const FString CultureName = FInternationalization::Get().GetCurrentCulture()->GetName();
 		const bool bIsZh = CultureName.StartsWith(TEXT("zh"));
 		return bIsZh ? ZhText : EnText;
+	}
+	
+	/**
+	 * 获取资产缩略图并保存到临时文件
+	 * @param AssetData 资产数据
+	 * @param ThumbnailSize 缩略图大小（默认 128x128）
+	 * @return PNG 文件的完整路径，失败返回空字符串
+	 */
+	FString SaveAssetThumbnailToFile(const FAssetData& AssetData, int32 ThumbnailSize = 128)
+	{
+		// 🚫 过滤掉蓝图 (Blueprint)，因为它们通常没有可视内容导致缩略图全黑
+		// 用户更希望显示默认的占位图标
+		if (AssetData.AssetClass == FName("Blueprint"))
+		{
+			return FString();
+		}
+
+		// 尝试从包中获取已有的缩略图
+		FName PackageName = AssetData.PackageName;
+		FString PackageString = PackageName.ToString();
+		
+		// 首先尝试获取已缓存的缩略图
+		const FObjectThumbnail* ExistingThumbnail = ThumbnailTools::FindCachedThumbnail(PackageString);
+		
+		// 如果没有缓存的缩略图，尝试渲染
+		FObjectThumbnail RenderedThumbnail;
+		const FObjectThumbnail* ThumbnailToUse = ExistingThumbnail;
+		
+		if (ExistingThumbnail)
+		{
+			// 检查缓存缩略图的尺寸
+			if (ExistingThumbnail->GetImageWidth() < ThumbnailSize || ExistingThumbnail->GetImageHeight() < ThumbnailSize)
+			{
+				UE_LOG(LogUALContentBrowser, Log, TEXT("缓存缩略图尺寸(%dx%d)小于请求尺寸(%d)，将强制重新渲染: %s"), 
+					ExistingThumbnail->GetImageWidth(), ExistingThumbnail->GetImageHeight(), ThumbnailSize, *PackageString);
+				// 忽略过小的缓存
+				ThumbnailToUse = nullptr;
+			}
+			else
+			{
+				// UE_LOG(LogUALContentBrowser, Log, TEXT("使用缓存缩略图: %s"), *PackageString);
+			}
+		}
+		
+		if (!ThumbnailToUse || ThumbnailToUse->GetImageWidth() == 0)
+		{
+			// UE_LOG(LogUALContentBrowser, Log, TEXT("未找到有效缓存，尝试渲染缩略图: %s"), *PackageString);
+			// 加载资产对象
+			UObject* Asset = AssetData.GetAsset();
+			if (!Asset)
+			{
+				return FString();
+			}
+			
+			// 渲染缩略图
+			ThumbnailTools::RenderThumbnail(
+				Asset, 
+				ThumbnailSize, 
+				ThumbnailSize, 
+				ThumbnailTools::EThumbnailTextureFlushMode::NeverFlush, 
+				nullptr, 
+				&RenderedThumbnail
+			);
+			
+			ThumbnailToUse = &RenderedThumbnail;
+		}
+		
+		if (!ThumbnailToUse || ThumbnailToUse->GetImageWidth() == 0 || ThumbnailToUse->GetImageHeight() == 0)
+		{
+			UE_LOG(LogUALContentBrowser, Warning, TEXT("无法生成有效缩略图: %s"), *PackageString);
+			return FString();
+		}
+		
+		const int32 ImageWidth = ThumbnailToUse->GetImageWidth();
+		const int32 ImageHeight = ThumbnailToUse->GetImageHeight();
+		
+		// 准备 PNG 数据
+		TArray64<uint8> PngData;
+
+		// 获取原始数据（无论源格式如何，都尝试转为 BGRA）
+		TArray<uint8> RawData;
+		int32 Width = ImageWidth;
+		int32 Height = ImageHeight;
+		
+		const TArray<uint8>& SourceData = ThumbnailToUse->AccessImageData();
+		IImageWrapperModule& ImageWrapperModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>("ImageWrapper");
+		EImageFormat DetectedFormat = ImageWrapperModule.DetectImageFormat(SourceData.GetData(), SourceData.Num());
+		
+		bool bGotRawData = false;
+		
+		if (DetectedFormat != EImageFormat::Invalid)
+		{
+			// 压缩格式，需要解压
+			TSharedPtr<IImageWrapper> SourceWrapper = ImageWrapperModule.CreateImageWrapper(DetectedFormat);
+			if (SourceWrapper.IsValid() && SourceWrapper->SetCompressed(SourceData.GetData(), SourceData.Num()))
+			{
+				if (SourceWrapper->GetRaw(ERGBFormat::BGRA, 8, RawData))
+				{
+					Width = SourceWrapper->GetWidth();
+					Height = SourceWrapper->GetHeight();
+					bGotRawData = true;
+				}
+			}
+		}
+		else
+		{
+			// 假设为未压缩的 BGRA
+			if (SourceData.Num() == ImageWidth * ImageHeight * 4)
+			{
+				RawData = SourceData;
+				bGotRawData = true;
+			}
+		}
+
+		if (bGotRawData && RawData.Num() > 0)
+		{
+			// 强制设置 Alpha 通道为 255 (从 3 开始，每 4 字节一个 Alpha)
+			for (int32 i = 3; i < RawData.Num(); i += 4)
+			{
+				RawData[i] = 255;
+			}
+			
+			// 重新压缩为 PNG
+			TSharedPtr<IImageWrapper> PngWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::PNG);
+			if (PngWrapper.IsValid() && PngWrapper->SetRaw(RawData.GetData(), RawData.Num(), Width, Height, ERGBFormat::BGRA, 8))
+			{
+				PngData = PngWrapper->GetCompressed();
+			}
+		}
+		else
+		{
+			UE_LOG(LogUALContentBrowser, Warning, TEXT("无法获取缩略图原始数据: %s"), *PackageString);
+		}
+
+		if (PngData.Num() > 0)
+		{
+			// 保存到临时目录
+			FString TempDir = FPaths::ProjectSavedDir() / TEXT("UALinkThumbnails");
+			IFileManager::Get().MakeDirectory(*TempDir, true);
+			
+			// 使用资产名称作为文件名
+			FString SafeName = AssetData.AssetName.ToString();
+			SafeName = SafeName.Replace(TEXT(" "), TEXT("_"));
+			FString FilePath = TempDir / FString::Printf(TEXT("%s_%lld.png"), *SafeName, FDateTime::Now().GetTicks());
+			
+			// 写入文件
+			if (FFileHelper::SaveArrayToFile(TArray<uint8>(PngData), *FilePath))
+			{
+				UE_LOG(LogUALContentBrowser, Log, TEXT("✅ 缩略图已保存: %s"), *FilePath);
+				return FilePath;
+			}
+		}
+		
+		return FString();
 	}
 }
 
@@ -216,14 +379,74 @@ void FUAL_ContentBrowserExt::HandleImportToAgent(const TArray<FString>& Selected
 
 void FUAL_ContentBrowserExt::HandleImportAssets(const TArray<FAssetData>& SelectedAssets)
 {
-	TArray<TSharedPtr<FJsonValue>> AssetPathsArray;
-	TArray<TSharedPtr<FJsonValue>> AssetRealPathsArray;
-
+	// 获取 AssetRegistry
+	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+	
+	// 🚀 收集依赖闭包：类似虚幻引擎的迁移功能
+	// 使用 Set 来追踪已处理的包，避免循环依赖
+	TSet<FName> ProcessedPackages;
+	TArray<FName> PackageQueue;
+	
+	// 初始化队列：添加用户选中的资产
 	for (const FAssetData& AssetData : SelectedAssets)
 	{
-		const FString PackagePath = AssetData.PackageName.ToString();
+		if (!ProcessedPackages.Contains(AssetData.PackageName))
+		{
+			PackageQueue.Add(AssetData.PackageName);
+			ProcessedPackages.Add(AssetData.PackageName);
+		}
+	}
+	
+	// BFS 遍历依赖图，收集所有 /Game 路径的依赖
+	int32 QueueIndex = 0;
+	while (QueueIndex < PackageQueue.Num())
+	{
+		FName CurrentPackage = PackageQueue[QueueIndex++];
+		
+		// 获取当前包的所有依赖
+		TArray<FName> Dependencies;
+		AssetRegistry.GetDependencies(CurrentPackage, Dependencies);
+		
+		for (const FName& DepPackage : Dependencies)
+		{
+			FString DepPath = DepPackage.ToString();
+			
+			// 只处理 /Game 路径的依赖（项目内资产）
+			if (DepPath.StartsWith(TEXT("/Game/")) && !ProcessedPackages.Contains(DepPackage))
+			{
+				PackageQueue.Add(DepPackage);
+				ProcessedPackages.Add(DepPackage);
+			}
+		}
+	}
+	
+	UE_LOG(LogUALContentBrowser, Log, TEXT("📦 依赖闭包收集完成: 用户选择 %d 个, 总共 %d 个资产(含依赖)"), 
+		SelectedAssets.Num(), PackageQueue.Num());
+	
+	// 构建输出数组
+	TArray<TSharedPtr<FJsonValue>> AssetPathsArray;
+	TArray<TSharedPtr<FJsonValue>> AssetRealPathsArray;
+	TArray<TSharedPtr<FJsonValue>> AssetMetadataArray;
+	
+	// 处理所有收集到的包
+	for (const FName& PackageName : PackageQueue)
+	{
+		const FString PackagePath = PackageName.ToString();
 		AssetPathsArray.Add(MakeShared<FJsonValueString>(PackagePath));
-
+		
+		// 获取包中的资产数据
+		TArray<FAssetData> PackageAssets;
+		AssetRegistry.GetAssetsByPackageName(PackageName, PackageAssets);
+		
+		if (PackageAssets.Num() == 0)
+		{
+			UE_LOG(LogUALContentBrowser, Warning, TEXT("包 %s 中没有找到资产"), *PackagePath);
+			continue;
+		}
+		
+		const FAssetData& AssetData = PackageAssets[0];
+		
 		// 判断是否是地图（World），决定扩展名
 		bool bIsWorld = false;
 #if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
@@ -238,16 +461,60 @@ void FUAL_ContentBrowserExt::HandleImportAssets(const TArray<FAssetData>& Select
 		{
 			const FString FullPath = FPaths::ConvertRelativePathToFull(Filename);
 			AssetRealPathsArray.Add(MakeShared<FJsonValueString>(FullPath));
-			UE_LOG(LogUALContentBrowser, Log, TEXT("%s %s -> %s"),
-				*LocalizedString(TEXT("导入资产"), TEXT("Import asset")),
-				*PackagePath, *FullPath);
+			UE_LOG(LogUALContentBrowser, Verbose, TEXT("添加资产: %s -> %s"), *PackagePath, *FullPath);
 		}
 		else
 		{
-			UE_LOG(LogUALContentBrowser, Warning, TEXT("%s: %s"),
-				*LocalizedString(TEXT("无法转换资产包路径为文件路径"), TEXT("Failed to convert asset package path to file path")),
-				*PackagePath);
+			UE_LOG(LogUALContentBrowser, Warning, TEXT("无法转换包路径: %s"), *PackagePath);
+			continue;
 		}
+		
+		// 构建资产元数据
+		TSharedPtr<FJsonObject> MetadataObj = MakeShared<FJsonObject>();
+		
+		MetadataObj->SetStringField(TEXT("name"), AssetData.AssetName.ToString());
+		MetadataObj->SetStringField(TEXT("package"), PackagePath);
+		
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+		MetadataObj->SetStringField(TEXT("class"), AssetData.AssetClassPath.GetAssetName().ToString());
+#else
+		MetadataObj->SetStringField(TEXT("class"), AssetData.AssetClass.ToString());
+#endif
+		
+		// 获取直接依赖（用于元数据记录）
+		TArray<FName> DirectDeps;
+		AssetRegistry.GetDependencies(PackageName, DirectDeps);
+		
+		TArray<TSharedPtr<FJsonValue>> DepsArray;
+		for (const FName& DepName : DirectDeps)
+		{
+			FString DepPath = DepName.ToString();
+			if (DepPath.StartsWith(TEXT("/Game/")))
+			{
+				DepsArray.Add(MakeShared<FJsonValueString>(DepPath));
+			}
+		}
+		MetadataObj->SetArrayField(TEXT("dependencies"), DepsArray);
+		
+		// 获取文件大小
+		if (!Filename.IsEmpty())
+		{
+			int64 FileSize = IFileManager::Get().FileSize(*Filename);
+			if (FileSize >= 0)
+			{
+				MetadataObj->SetNumberField(TEXT("size"), (double)FileSize);
+			}
+		}
+		
+		// 🖼️ 获取资产缩略图（保存到临时文件，返回路径）
+		// 请求 512x512 的高清缩略图
+		FString ThumbnailPath = SaveAssetThumbnailToFile(AssetData, 512);
+		if (!ThumbnailPath.IsEmpty())
+		{
+			MetadataObj->SetStringField(TEXT("thumbnail_path"), ThumbnailPath);
+		}
+		
+		AssetMetadataArray.Add(MakeShared<FJsonValueObject>(MetadataObj));
 	}
 
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
@@ -255,6 +522,10 @@ void FUAL_ContentBrowserExt::HandleImportAssets(const TArray<FAssetData>& Select
 	if (AssetRealPathsArray.Num() > 0)
 	{
 		Payload->SetArrayField(TEXT("asset_real_paths"), AssetRealPathsArray);
+	}
+	if (AssetMetadataArray.Num() > 0)
+	{
+		Payload->SetArrayField(TEXT("asset_metadata"), AssetMetadataArray);
 	}
 
 	AddProjectMeta(Payload);
@@ -270,9 +541,9 @@ void FUAL_ContentBrowserExt::HandleImportAssets(const TArray<FAssetData>& Select
 	FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
 
 	FUAL_NetworkManager::Get().SendMessage(OutJson);
-	UE_LOG(LogUALContentBrowser, Verbose, TEXT("%s: %s"),
-		*LocalizedString(TEXT("已发送资产导入请求 JSON"), TEXT("Import assets request sent JSON")),
-		*OutJson);
+	UE_LOG(LogUALContentBrowser, Log, TEXT("%s: 共 %d 个资产"),
+		*LocalizedString(TEXT("已发送资产导入请求"), TEXT("Import assets request sent")),
+		AssetMetadataArray.Num());
 }
 
 void FUAL_ContentBrowserExt::AddProjectMeta(TSharedPtr<FJsonObject>& Payload) const

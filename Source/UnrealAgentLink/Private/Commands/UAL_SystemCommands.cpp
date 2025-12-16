@@ -54,6 +54,11 @@ void FUAL_SystemCommands::RegisterCommands(TMap<FString, TFunction<void(const TS
 	{
 		Handle_ManagePlugin(Payload, RequestId);
 	});
+
+	CommandMap.Add(TEXT("system.get_project_info"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_GetProjectInfo(Payload, RequestId);
+	});
 }
 
 // ========== 从 UAL_CommandHandler.cpp 迁移以下函数 ==========
@@ -241,4 +246,40 @@ void FUAL_SystemCommands::Handle_ManagePlugin(const TSharedPtr<FJsonObject>& Pay
 	}
 
 	UAL_CommandUtils::SendResponse(RequestId, bSuccess ? 200 : 500, Result);
+}
+
+/**
+ * system.get_project_info - 获取项目信息
+ * 返回项目路径、Content目录等信息,用于外部工具快速定位项目资源
+ */
+void FUAL_SystemCommands::Handle_GetProjectInfo(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+	const FString ProjectFilePath = FPaths::GetProjectFilePath();
+	const FString ProjectDir = FPaths::ProjectDir();
+	const FString ContentDir = FPaths::ProjectContentDir();
+	const FString SavedDir = FPaths::ProjectSavedDir();
+	const FString IntermediateDir = FPaths::ProjectIntermediateDir();
+	const FString PluginsDir = FPaths::ProjectPluginsDir();
+	
+	// 获取项目名称
+	FString ProjectName = FApp::GetProjectName();
+	
+	TSharedPtr<FJsonObject> Response = MakeShared<FJsonObject>();
+	Response->SetBoolField(TEXT("ok"), true);
+	Response->SetStringField(TEXT("project_name"), ProjectName);
+	Response->SetStringField(TEXT("project_path"), ProjectFilePath);
+	Response->SetStringField(TEXT("project_dir"), ProjectDir);
+	Response->SetStringField(TEXT("content_dir"), ContentDir);
+	Response->SetStringField(TEXT("saved_dir"), SavedDir);
+	Response->SetStringField(TEXT("intermediate_dir"), IntermediateDir);
+	Response->SetStringField(TEXT("plugins_dir"), PluginsDir);
+	
+	// 添加引擎版本信息
+	Response->SetStringField(TEXT("engine_version"), FApp::GetBuildVersion());
+	Response->SetNumberField(TEXT("engine_major"), ENGINE_MAJOR_VERSION);
+	Response->SetNumberField(TEXT("engine_minor"), ENGINE_MINOR_VERSION);
+	
+	UE_LOG(LogUALSystem, Log, TEXT("system.get_project_info: %s"), *ProjectName);
+	
+	UAL_CommandUtils::SendResponse(RequestId, 200, Response);
 }

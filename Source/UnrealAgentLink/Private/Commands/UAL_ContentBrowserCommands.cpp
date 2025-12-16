@@ -978,12 +978,17 @@ void FUAL_ContentBrowserCommands::Handle_NormalizedImport(
 		return;
 	}
 	
+	// 解析语义后缀选项
+	bool bUseSemanticSuffix = true;
+	Payload->TryGetBoolField(TEXT("use_semantic_suffix"), bUseSemanticSuffix);
+	
 	// 配置导入规则
 	FUALImportRuleSet RuleSet;
 	RuleSet.InitDefaults();
 	RuleSet.TargetRoot = TargetRoot;
 	RuleSet.bUsePascalCase = bUsePascalCase;
 	RuleSet.bAutoRenameOnConflict = bAutoRenameOnConflict;
+	RuleSet.bUseSemanticSuffix = bUseSemanticSuffix;
 	
 	// 执行规范化导入
 	FUALNormalizedImporter Importer;
