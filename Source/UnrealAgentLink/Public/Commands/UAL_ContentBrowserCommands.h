@@ -87,4 +87,14 @@ public:
 	 * @param RequestId 请求 ID
 	 */
 	static void Handle_NormalizedImport(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	
+	/**
+	 * content.audit_optimization - 资产优化审计
+	 * 检测 Nanite、Lumen 等功能的使用情况，提供优化建议
+	 * 
+	 * @param Payload 请求参数:
+	 *   - check_type: 可选，检查类型 ("NaniteUsage", "LumenMaterials", "TextureSize", "All")
+	 * @param RequestId 请求 ID
+	 */
+	static void Handle_AuditOptimization(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 };

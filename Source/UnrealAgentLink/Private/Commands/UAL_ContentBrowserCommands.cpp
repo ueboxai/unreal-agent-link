@@ -16,6 +16,10 @@
 #include "Factories/FbxImportUI.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/Texture2D.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialInstanceConstant.h"
+#include "Materials/MaterialInterface.h"
+#include "Misc/ConfigCacheIni.h"
 #include "UObject/SavePackage.h"
 #include "Misc/PackageName.h"
 #include "Framework/Notifications/NotificationManager.h"
@@ -37,8 +41,9 @@ void FUAL_ContentBrowserCommands::RegisterCommands(
 	CommandMap.Add(TEXT("content.delete"), &Handle_DeleteAssets);
 	CommandMap.Add(TEXT("content.describe"), &Handle_DescribeAsset);
 	CommandMap.Add(TEXT("content.normalized_import"), &Handle_NormalizedImport);
+	CommandMap.Add(TEXT("content.audit_optimization"), &Handle_AuditOptimization);
 	
-	UE_LOG(LogUALContentCmd, Log, TEXT("ContentBrowser commands registered: content.search, content.import, content.move, content.delete, content.describe, content.normalized_import"));
+	UE_LOG(LogUALContentCmd, Log, TEXT("ContentBrowser commands registered: content.search, content.import, content.move, content.delete, content.describe, content.normalized_import, content.audit_optimization"));
 }
 
 // ============================================================================
@@ -1111,4 +1116,197 @@ void FUAL_ContentBrowserCommands::Handle_NormalizedImport(
 	}
 	
 	UAL_CommandUtils::SendResponse(RequestId, bSuccess ? 200 : 500, Response);
+}
+
+void FUAL_ContentBrowserCommands::Handle_AuditOptimization(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+	FString CheckType = TEXT("All");
+	Payload->TryGetStringField(TEXT("check_type"), CheckType);
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+
+	// Nanite 使用情况检测
+	if (CheckType.Equals(TEXT("NaniteUsage"), ESearchCase::IgnoreCase) || CheckType.Equals(TEXT("All"), ESearchCase::IgnoreCase))
+	{
+#if ENGINE_MAJOR_VERSION >= 5
+		TSharedPtr<FJsonObject> NaniteData = MakeShared<FJsonObject>();
+		
+		// 检查配置
+		FString NaniteEnabled;
+		GConfig->GetString(TEXT("/Script/Engine.RendererSettings"), TEXT("r.Nanite.ProjectEnabled"), NaniteEnabled, GEngineIni);
+		bool bNaniteEnabledInConfig = NaniteEnabled.Equals(TEXT("True"), ESearchCase::IgnoreCase) || NaniteEnabled.Equals(TEXT("1"), ESearchCase::IgnoreCase);
+		NaniteData->SetBoolField(TEXT("enabled_in_config"), bNaniteEnabledInConfig);
+
+		// 扫描资产
+		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+		IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+
+		// 确保资产注册表已完全加载
+		AssetRegistry.WaitForCompletion();
+
+		TArray<FAssetData> MeshAssets;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+		AssetRegistry.GetAssetsByClass(UStaticMesh::StaticClass()->GetClassPathName(), MeshAssets, true);
+#else
+		AssetRegistry.GetAssetsByClass(UStaticMesh::StaticClass()->GetFName(), MeshAssets, true);
+#endif
+
+		int32 MeshesWithNanite = 0;
+		for (const FAssetData& AssetData : MeshAssets)
+		{
+			// 加载资产并检查 Nanite 设置
+			UStaticMesh* Mesh = Cast<UStaticMesh>(AssetData.GetAsset());
+			if (Mesh && Mesh->HasValidNaniteData())
+			{
+				MeshesWithNanite++;
+			}
+		}
+
+		NaniteData->SetNumberField(TEXT("mesh_count"), MeshAssets.Num());
+		NaniteData->SetNumberField(TEXT("meshes_with_nanite"), MeshesWithNanite);
+
+		if (bNaniteEnabledInConfig && MeshesWithNanite == 0)
+		{
+			NaniteData->SetStringField(TEXT("suggestion"), TEXT("检测到您开启了 Nanite 支持，但场景中没有任何模型使用了 Nanite。建议在 Project Settings 中关闭 Nanite 以剔除相关着色器变体，可显著提升构建速度。"));
+		}
+		else if (bNaniteEnabledInConfig && MeshesWithNanite > 0)
+		{
+			NaniteData->SetStringField(TEXT("suggestion"), FString::Printf(TEXT("检测到 %d 个模型使用了 Nanite，Nanite 功能正在被使用。"), MeshesWithNanite));
+		}
+
+		Result->SetObjectField(TEXT("nanite_usage"), NaniteData);
+#endif
+	}
+
+	// Lumen 使用情况检测
+	if (CheckType.Equals(TEXT("LumenMaterials"), ESearchCase::IgnoreCase) || CheckType.Equals(TEXT("All"), ESearchCase::IgnoreCase))
+	{
+#if ENGINE_MAJOR_VERSION >= 5
+		TSharedPtr<FJsonObject> LumenData = MakeShared<FJsonObject>();
+		
+		// 检查配置
+		FString LumenEnabled;
+		FString DynamicGI;
+		GConfig->GetString(TEXT("/Script/Engine.RendererSettings"), TEXT("r.Lumen.Enabled"), LumenEnabled, GEngineIni);
+		GConfig->GetString(TEXT("/Script/Engine.RendererSettings"), TEXT("r.DynamicGlobalIlluminationMethod"), DynamicGI, GEngineIni);
+		
+		bool bLumenEnabledInConfig = LumenEnabled.Equals(TEXT("True"), ESearchCase::IgnoreCase) || LumenEnabled.Equals(TEXT("1"), ESearchCase::IgnoreCase);
+		bool bUsingLumenGI = DynamicGI.Contains(TEXT("Lumen"), ESearchCase::IgnoreCase);
+		
+		LumenData->SetBoolField(TEXT("enabled_in_config"), bLumenEnabledInConfig);
+		LumenData->SetBoolField(TEXT("using_lumen_gi"), bUsingLumenGI);
+
+		// 扫描材质中的自发光使用（Lumen 特征）
+		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+		IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+		AssetRegistry.WaitForCompletion();
+
+		TArray<FAssetData> MaterialAssets;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+		FARFilter MaterialFilter;
+		MaterialFilter.ClassPaths.Add(UMaterial::StaticClass()->GetClassPathName());
+		MaterialFilter.ClassPaths.Add(UMaterialInstanceConstant::StaticClass()->GetClassPathName());
+		AssetRegistry.GetAssets(MaterialFilter, MaterialAssets);
+#else
+		FARFilter MaterialFilter;
+		MaterialFilter.ClassNames.Add(UMaterial::StaticClass()->GetFName());
+		MaterialFilter.ClassNames.Add(UMaterialInstanceConstant::StaticClass()->GetFName());
+		AssetRegistry.GetAssets(MaterialFilter, MaterialAssets);
+#endif
+
+		int32 MaterialsWithEmissive = 0;
+		for (const FAssetData& AssetData : MaterialAssets)
+		{
+			// 检查 TagsAndValues 中是否有 Emissive 相关的标签
+			// 或者尝试加载材质检查
+			UMaterialInterface* Material = Cast<UMaterialInterface>(AssetData.GetAsset());
+			if (Material)
+			{
+				// 简单检查：如果有自发光颜色或强度不为零，则认为使用了自发光
+				// 注意：更精确的检查需要遍历材质节点图，这里使用简化方法
+				FLinearColor EmissiveColor;
+				float EmissiveStrength = 0.0f;
+				
+				if (Material->GetVectorParameterValue(TEXT("EmissiveColor"), EmissiveColor) ||
+					Material->GetScalarParameterValue(TEXT("EmissiveStrength"), EmissiveStrength))
+				{
+					if (EmissiveColor.R > 0.01f || EmissiveColor.G > 0.01f || EmissiveColor.B > 0.01f || EmissiveStrength > 0.01f)
+					{
+						MaterialsWithEmissive++;
+					}
+				}
+			}
+		}
+
+		LumenData->SetNumberField(TEXT("materials_with_emissive"), MaterialsWithEmissive);
+
+		if (bLumenEnabledInConfig || bUsingLumenGI)
+		{
+			if (MaterialsWithEmissive > 0)
+			{
+				LumenData->SetStringField(TEXT("suggestion"), FString::Printf(TEXT("检测到 %d 个材质使用了自发光，Lumen 功能正在被使用。"), MaterialsWithEmissive));
+			}
+			else
+			{
+				LumenData->SetStringField(TEXT("suggestion"), TEXT("Lumen 已启用，但未检测到使用自发光的材质。如果不需要全局光照，可以考虑禁用 Lumen 以减小包体。"));
+			}
+		}
+
+		Result->SetObjectField(TEXT("lumen_usage"), LumenData);
+#endif
+	}
+
+	// 纹理大小分析
+	if (CheckType.Equals(TEXT("TextureSize"), ESearchCase::IgnoreCase) || CheckType.Equals(TEXT("All"), ESearchCase::IgnoreCase))
+	{
+		TSharedPtr<FJsonObject> TextureData = MakeShared<FJsonObject>();
+		
+		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+		IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+		AssetRegistry.WaitForCompletion();
+
+		TArray<FAssetData> TextureAssets;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+		AssetRegistry.GetAssetsByClass(UTexture2D::StaticClass()->GetClassPathName(), TextureAssets, true);
+#else
+		AssetRegistry.GetAssetsByClass(UTexture2D::StaticClass()->GetFName(), TextureAssets, true);
+#endif
+
+		int32 TotalTextures = TextureAssets.Num();
+		int32 LargeTextures4K = 0;
+		int64 TotalTextureMemory = 0;
+
+		for (const FAssetData& AssetData : TextureAssets)
+		{
+			UTexture2D* Texture = Cast<UTexture2D>(AssetData.GetAsset());
+			if (Texture)
+			{
+				int32 Width = Texture->GetSizeX();
+				int32 Height = Texture->GetSizeY();
+				
+				if (Width >= 4096 || Height >= 4096)
+				{
+					LargeTextures4K++;
+				}
+
+				// 估算纹理内存（简化计算：RGBA8 = 4 bytes per pixel）
+				int64 TextureMemory = (int64)Width * Height * 4;
+				TotalTextureMemory += TextureMemory;
+			}
+		}
+
+		TextureData->SetNumberField(TEXT("total_textures"), TotalTextures);
+		TextureData->SetNumberField(TEXT("large_textures_4k"), LargeTextures4K);
+		TextureData->SetNumberField(TEXT("estimated_memory_bytes"), TotalTextureMemory);
+		TextureData->SetNumberField(TEXT("estimated_memory_mb"), TotalTextureMemory / (1024 * 1024));
+
+		if (LargeTextures4K > 0)
+		{
+			TextureData->SetStringField(TEXT("suggestion"), FString::Printf(TEXT("发现 %d 个 4K 或更大的纹理，考虑压缩或降低分辨率以减少包体大小。"), LargeTextures4K));
+		}
+
+		Result->SetObjectField(TEXT("texture_analysis"), TextureData);
+	}
+
+	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
 }

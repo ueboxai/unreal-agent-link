@@ -8,6 +8,7 @@
 #include "EngineUtils.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "ScopedTransaction.h"
 
 #if WITH_EDITOR
 #include "Selection.h"
@@ -20,6 +21,11 @@ void FUAL_LevelCommands::RegisterCommands(TMap<FString, TFunction<void(const TSh
 	CommandMap.Add(TEXT("level.query_assets"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
 	{
 		Handle_QueryAssets(Payload, RequestId);
+	});
+
+	CommandMap.Add(TEXT("level.organize_actors"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_OrganizeActors(Payload, RequestId);
 	});
 }
 
@@ -286,6 +292,121 @@ void FUAL_LevelCommands::Handle_QueryAssets(const TSharedPtr<FJsonObject>& Paylo
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetNumberField(TEXT("count"), Results.Num());
 	Data->SetArrayField(TEXT("assets"), AssetsJson);
+
+	UAL_CommandUtils::SendResponse(RequestId, 200, Data);
+}
+
+void FUAL_LevelCommands::Handle_OrganizeActors(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+#if WITH_EDITOR
+	// 创建撤销事务，使文件夹归类操作可通过 Ctrl+Z 撤销
+	FScopedTransaction Transaction(UAL_CommandUtils::LText(TEXT("组织Actor到文件夹"), TEXT("Organize Actors to Folder")));
+#endif
+
+	// 1) 解析参数
+	FString FolderPath;
+	if (!Payload->TryGetStringField(TEXT("folder_path"), FolderPath))
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required field: folder_path"));
+		return;
+	}
+
+	// 2) 构建targets对象（支持filter）
+	TSharedPtr<FJsonObject> Targets = MakeShared<FJsonObject>();
+	
+	// 支持filter参数（兼容actor.get的filter格式）
+	const TSharedPtr<FJsonObject>* FilterObj = nullptr;
+	if (Payload->TryGetObjectField(TEXT("filter"), FilterObj) && FilterObj && FilterObj->IsValid())
+	{
+		Targets->SetObjectField(TEXT("filter"), *FilterObj);
+	}
+	// 也支持直接传class参数（简化用法）
+	else
+	{
+		FString ClassFilter;
+		if (Payload->TryGetStringField(TEXT("class"), ClassFilter) && !ClassFilter.IsEmpty())
+		{
+			TSharedPtr<FJsonObject> Filter = MakeShared<FJsonObject>();
+			Filter->SetStringField(TEXT("class_contains"), ClassFilter);
+			Targets->SetObjectField(TEXT("filter"), Filter);
+		}
+	}
+
+	// 如果没有提供filter，默认匹配所有Actor
+	if (!Targets->HasField(TEXT("filter")))
+	{
+		TSharedPtr<FJsonObject> Filter = MakeShared<FJsonObject>();
+		Targets->SetObjectField(TEXT("filter"), Filter);
+	}
+
+	// 3) 获取目标World
+	UWorld* World = UAL_CommandUtils::GetTargetWorld();
+	if (!World)
+	{
+		UAL_CommandUtils::SendError(RequestId, 500, TEXT("No world available"));
+		return;
+	}
+
+	// 4) 解析targets获取匹配的Actor列表
+	TSet<AActor*> TargetSet;
+	FString TargetError;
+	if (!UAL_CommandUtils::ResolveTargetsToActors(Targets, World, TargetSet, TargetError))
+	{
+		UAL_CommandUtils::SendError(RequestId, 404, TargetError);
+		return;
+	}
+
+	if (TargetSet.Num() == 0)
+	{
+		UAL_CommandUtils::SendError(RequestId, 404, TEXT("No actors found matching the filter"));
+		return;
+	}
+
+	// 5) 批量设置FolderPath
+	TArray<AActor*> TargetArray = TargetSet.Array();
+	Algo::Sort(TargetArray, [](AActor* A, AActor* B)
+	{
+		const FString NameA = UAL_CommandUtils::GetActorFriendlyName(A);
+		const FString NameB = UAL_CommandUtils::GetActorFriendlyName(B);
+		return NameA < NameB;
+	});
+
+	TArray<TSharedPtr<FJsonValue>> Results;
+	int32 SuccessCount = 0;
+
+	for (AActor* Actor : TargetArray)
+	{
+		if (!Actor)
+		{
+			continue;
+		}
+
+		TSharedPtr<FJsonObject> ActorObj = UAL_CommandUtils::BuildActorInfo(Actor);
+		if (!ActorObj.IsValid())
+		{
+			continue;
+		}
+
+#if WITH_EDITOR
+		// 设置文件夹路径
+		Actor->SetFolderPath(FName(*FolderPath));
+		const FString ActualPath = Actor->GetFolderPath().ToString();
+		
+		SuccessCount++;
+		ActorObj->SetStringField(TEXT("folder_path"), ActualPath);
+#else
+		// 非编辑器模式下不支持文件夹路径
+		ActorObj->SetStringField(TEXT("error"), TEXT("Folder path is only available in editor mode"));
+#endif
+
+		Results.Add(MakeShared<FJsonValueObject>(ActorObj));
+	}
+
+	// 6) 构建响应
+	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+	Data->SetNumberField(TEXT("count"), SuccessCount);
+	Data->SetNumberField(TEXT("total_found"), TargetSet.Num());
+	Data->SetArrayField(TEXT("actors"), Results);
 
 	UAL_CommandUtils::SendResponse(RequestId, 200, Data);
 }

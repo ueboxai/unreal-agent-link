@@ -21,4 +21,6 @@ public:
 	// Public Handlers called by Dispatcher
 	// level.query_assets - 多维资产查询
 	static void Handle_QueryAssets(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	// level.organize_actors - 批量组织Actor到文件夹
+	static void Handle_OrganizeActors(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 };

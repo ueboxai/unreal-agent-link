@@ -16,6 +16,8 @@
 #include "Misc/ConfigCacheIni.h"
 #include "Interfaces/IPluginManager.h"
 #include "UAL_VersionCompat.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogUALEditor, Log, All);
 
@@ -40,6 +42,21 @@ void FUAL_EditorCommands::RegisterCommands(TMap<FString, TFunction<void(const TS
 	CommandMap.Add(TEXT("editor.get_project_info"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
 	{
 		Handle_GetProjectInfo(Payload, RequestId);
+	});
+
+	CommandMap.Add(TEXT("project.get_config"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_GetConfig(Payload, RequestId);
+	});
+
+	CommandMap.Add(TEXT("project.set_config"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_SetConfig(Payload, RequestId);
+	});
+
+	CommandMap.Add(TEXT("project.analyze_uproject"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_AnalyzeUProject(Payload, RequestId);
 	});
 }
 
@@ -414,3 +431,285 @@ TSharedPtr<FJsonObject> FUAL_EditorCommands::BuildProjectInfo()
 
 	return Data;
 }
+// 临时文件，用于添加新函数
+void FUAL_EditorCommands::Handle_GetConfig(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+	FString ConfigName;
+	if (!Payload->TryGetStringField(TEXT("config_name"), ConfigName))
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing field: config_name"));
+		return;
+	}
+
+	FString Section;
+	if (!Payload->TryGetStringField(TEXT("section"), Section))
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing field: section"));
+		return;
+	}
+
+	FString Key;
+	if (!Payload->TryGetStringField(TEXT("key"), Key))
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing field: key"));
+		return;
+	}
+
+	// 映射配置文件�?
+	FString ConfigFileName;
+	if (ConfigName.Equals(TEXT("Engine"), ESearchCase::IgnoreCase))
+	{
+		ConfigFileName = GEngineIni;
+	}
+	else if (ConfigName.Equals(TEXT("Game"), ESearchCase::IgnoreCase))
+	{
+		ConfigFileName = GGameIni;
+	}
+	else if (ConfigName.Equals(TEXT("Editor"), ESearchCase::IgnoreCase))
+	{
+		ConfigFileName = GEditorIni;
+	}
+	else if (ConfigName.Equals(TEXT("EditorPerProjectUserSettings"), ESearchCase::IgnoreCase))
+	{
+		ConfigFileName = GEditorPerProjectIni;
+	}
+	else
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, FString::Printf(TEXT("Unsupported config_name: %s. Supported: Engine, Game, Editor, EditorPerProjectUserSettings"), *ConfigName));
+		return;
+	}
+
+	// 读取配置
+	FString Value;
+	if (!GConfig->GetString(*Section, *Key, Value, ConfigFileName))
+	{
+		// 配置项不存在，返回空值（不是错误�?
+		Value = TEXT("");
+	}
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("config_name"), ConfigName);
+	Result->SetStringField(TEXT("section"), Section);
+	Result->SetStringField(TEXT("key"), Key);
+	Result->SetStringField(TEXT("value"), Value);
+	Result->SetStringField(TEXT("file_path"), ConfigFileName);
+
+	UE_LOG(LogUALEditor, Log, TEXT("project.get_config: %s [%s] %s = %s"), *ConfigName, *Section, *Key, *Value);
+
+	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
+}
+
+void FUAL_EditorCommands::Handle_SetConfig(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+	FString ConfigName;
+	if (!Payload->TryGetStringField(TEXT("config_name"), ConfigName))
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing field: config_name"));
+		return;
+	}
+
+	FString Section;
+	if (!Payload->TryGetStringField(TEXT("section"), Section))
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing field: section"));
+		return;
+	}
+
+	FString Key;
+	if (!Payload->TryGetStringField(TEXT("key"), Key))
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing field: key"));
+		return;
+	}
+
+	FString Value;
+	if (!Payload->TryGetStringField(TEXT("value"), Value))
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing field: value"));
+		return;
+	}
+
+	// 映射配置文件�?
+	FString ConfigFileName;
+	if (ConfigName.Equals(TEXT("Engine"), ESearchCase::IgnoreCase))
+	{
+		ConfigFileName = GEngineIni;
+	}
+	else if (ConfigName.Equals(TEXT("Game"), ESearchCase::IgnoreCase))
+	{
+		ConfigFileName = GGameIni;
+	}
+	else if (ConfigName.Equals(TEXT("Editor"), ESearchCase::IgnoreCase))
+	{
+		ConfigFileName = GEditorIni;
+	}
+	else if (ConfigName.Equals(TEXT("EditorPerProjectUserSettings"), ESearchCase::IgnoreCase))
+	{
+		ConfigFileName = GEditorPerProjectIni;
+	}
+	else
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, FString::Printf(TEXT("Unsupported config_name: %s. Supported: Engine, Game, Editor, EditorPerProjectUserSettings"), *ConfigName));
+		return;
+	}
+
+	// 设置配置
+	GConfig->SetString(*Section, *Key, *Value, ConfigFileName);
+	
+	// 刷新到磁�?
+	GConfig->Flush(false, ConfigFileName);
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetStringField(TEXT("config_name"), ConfigName);
+	Result->SetStringField(TEXT("section"), Section);
+	Result->SetStringField(TEXT("key"), Key);
+	Result->SetStringField(TEXT("value"), Value);
+	Result->SetStringField(TEXT("file_path"), ConfigFileName);
+
+	UE_LOG(LogUALEditor, Log, TEXT("project.set_config: %s [%s] %s = %s"), *ConfigName, *Section, *Key, *Value);
+
+	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
+}
+
+void FUAL_EditorCommands::Handle_AnalyzeUProject(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+	const FString ProjectFilePath = FPaths::GetProjectFilePath();
+	FString ProjectFileContent;
+	
+	if (!FFileHelper::LoadFileToString(ProjectFileContent, *ProjectFilePath))
+	{
+		UAL_CommandUtils::SendError(RequestId, 500, FString::Printf(TEXT("Failed to read .uproject file: %s"), *ProjectFilePath));
+		return;
+	}
+
+	TSharedPtr<FJsonObject> ProjectJson;
+	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ProjectFileContent);
+	
+	if (!FJsonSerializer::Deserialize(Reader, ProjectJson) || !ProjectJson.IsValid())
+	{
+		UAL_CommandUtils::SendError(RequestId, 500, TEXT("Failed to parse .uproject file as JSON"));
+		return;
+	}
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+
+	// 提取 EngineAssociation
+	FString EngineAssociation;
+	if (ProjectJson->TryGetStringField(TEXT("EngineAssociation"), EngineAssociation))
+	{
+		Result->SetStringField(TEXT("engine_association"), EngineAssociation);
+	}
+
+	// 提取 TargetPlatforms
+	const TArray<TSharedPtr<FJsonValue>>* TargetPlatforms = nullptr;
+	if (ProjectJson->TryGetArrayField(TEXT("TargetPlatforms"), TargetPlatforms))
+	{
+		TArray<TSharedPtr<FJsonValue>> PlatformArray;
+		for (const TSharedPtr<FJsonValue>& Value : *TargetPlatforms)
+		{
+			if (Value.IsValid() && Value->Type == EJson::String)
+			{
+				PlatformArray.Add(MakeShared<FJsonValueString>(Value->AsString()));
+			}
+		}
+		if (PlatformArray.Num() > 0)
+		{
+			Result->SetArrayField(TEXT("target_platforms"), PlatformArray);
+		}
+	}
+
+	// 提取 Modules
+	const TArray<TSharedPtr<FJsonValue>>* Modules = nullptr;
+	if (ProjectJson->TryGetArrayField(TEXT("Modules"), Modules))
+	{
+		TArray<TSharedPtr<FJsonValue>> ModuleArray;
+		for (const TSharedPtr<FJsonValue>& Value : *Modules)
+		{
+			if (Value.IsValid() && Value->Type == EJson::Object)
+			{
+				const TSharedPtr<FJsonObject> ModuleObj = Value->AsObject();
+				if (ModuleObj.IsValid())
+				{
+					// 保留完整的模块对象（包含 Name, Type, LoadingPhase 等字段）
+					ModuleArray.Add(MakeShared<FJsonValueObject>(ModuleObj));
+				}
+			}
+		}
+		if (ModuleArray.Num() > 0)
+		{
+			Result->SetArrayField(TEXT("modules"), ModuleArray);
+		}
+	}
+
+	// 提取 Plugins（复�?BuildProjectInfo 中的逻辑�?
+	const TArray<TSharedPtr<FJsonValue>>* ProjectPlugins = nullptr;
+	if (ProjectJson->TryGetArrayField(TEXT("Plugins"), ProjectPlugins) && ProjectPlugins)
+	{
+		IPluginManager& PluginManager = IPluginManager::Get();
+
+		TArray<TSharedPtr<FJsonValue>> PluginArray;
+
+		for (const TSharedPtr<FJsonValue>& Value : *ProjectPlugins)
+		{
+			if (!Value.IsValid() || Value->Type != EJson::Object)
+			{
+				continue;
+			}
+
+			const TSharedPtr<FJsonObject> PluginDecl = Value->AsObject();
+			if (!PluginDecl.IsValid())
+			{
+				continue;
+			}
+
+			FString PluginName;
+			if (!PluginDecl->TryGetStringField(TEXT("Name"), PluginName))
+			{
+				PluginDecl->TryGetStringField(TEXT("name"), PluginName);
+			}
+			if (PluginName.IsEmpty())
+			{
+				continue;
+			}
+
+			bool bEnabled = true;
+			if (!PluginDecl->TryGetBoolField(TEXT("Enabled"), bEnabled))
+			{
+				PluginDecl->TryGetBoolField(TEXT("enabled"), bEnabled);
+			}
+
+			TSharedPtr<FJsonObject> PluginObj = MakeShared<FJsonObject>();
+			PluginObj->SetStringField(TEXT("name"), PluginName);
+			PluginObj->SetBoolField(TEXT("enabled"), bEnabled);
+
+			// 尝试补全插件元信�?
+			const TSharedPtr<IPlugin> Plugin = PluginManager.FindPlugin(PluginName);
+			if (Plugin.IsValid())
+			{
+				PluginObj->SetStringField(TEXT("version_name"), Plugin->GetDescriptor().VersionName);
+				PluginObj->SetStringField(TEXT("category"), Plugin->GetDescriptor().Category);
+				PluginObj->SetStringField(TEXT("base_dir"), Plugin->GetBaseDir());
+				PluginObj->SetStringField(TEXT("friendly_name"), Plugin->GetDescriptor().FriendlyName);
+				PluginObj->SetStringField(TEXT("description"), Plugin->GetDescriptor().Description);
+			}
+			else
+			{
+				PluginObj->SetStringField(TEXT("version_name"), TEXT(""));
+				PluginObj->SetStringField(TEXT("category"), TEXT(""));
+				PluginObj->SetStringField(TEXT("base_dir"), TEXT(""));
+				PluginObj->SetStringField(TEXT("friendly_name"), TEXT(""));
+				PluginObj->SetStringField(TEXT("description"), TEXT(""));
+			}
+
+			PluginArray.Add(MakeShared<FJsonValueObject>(PluginObj));
+		}
+
+		if (PluginArray.Num() > 0)
+		{
+			Result->SetArrayField(TEXT("plugins"), PluginArray);
+		}
+	}
+
+	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
+}
+
