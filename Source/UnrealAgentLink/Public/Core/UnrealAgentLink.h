@@ -9,6 +9,7 @@ class FUAL_CommandHandler;
 class FUAL_LogInterceptor;
 class FUAL_NetworkManager;
 class FUAL_ContentBrowserExt;
+class FUAL_LevelViewportExt;
 
 class FToolBarBuilder;
 class FMenuBuilder;
@@ -37,4 +38,5 @@ private:
 	TUniquePtr<FUAL_CommandHandler> CommandHandler;
 	TSharedPtr<FUAL_LogInterceptor> LogInterceptor;
 	TUniquePtr<FUAL_ContentBrowserExt> ContentBrowserExt;
+	TUniquePtr<FUAL_LevelViewportExt> LevelViewportExt;
 };

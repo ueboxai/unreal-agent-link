@@ -386,6 +386,7 @@ void FUAL_ContentBrowserExt::HandleImportAssets(const TArray<FAssetData>& Select
 	// 🚀 收集依赖闭包：类似虚幻引擎的迁移功能
 	// 使用 Set 来追踪已处理的包，避免循环依赖
 	TSet<FName> ProcessedPackages;
+	TSet<FName> UserSelectedPackages;  // 用户直接选中的资产包
 	TArray<FName> PackageQueue;
 	
 	// 初始化队列：添加用户选中的资产
@@ -395,6 +396,7 @@ void FUAL_ContentBrowserExt::HandleImportAssets(const TArray<FAssetData>& Select
 		{
 			PackageQueue.Add(AssetData.PackageName);
 			ProcessedPackages.Add(AssetData.PackageName);
+			UserSelectedPackages.Add(AssetData.PackageName);  // 标记为用户选中的主资产
 		}
 	}
 	
@@ -417,12 +419,13 @@ void FUAL_ContentBrowserExt::HandleImportAssets(const TArray<FAssetData>& Select
 			{
 				PackageQueue.Add(DepPackage);
 				ProcessedPackages.Add(DepPackage);
+				// 依赖资产不加入 UserSelectedPackages
 			}
 		}
 	}
 	
 	UE_LOG(LogUALContentBrowser, Log, TEXT("📦 依赖闭包收集完成: 用户选择 %d 个, 总共 %d 个资产(含依赖)"), 
-		SelectedAssets.Num(), PackageQueue.Num());
+		UserSelectedPackages.Num(), PackageQueue.Num());
 	
 	// 构建输出数组
 	TArray<TSharedPtr<FJsonValue>> AssetPathsArray;
@@ -495,6 +498,10 @@ void FUAL_ContentBrowserExt::HandleImportAssets(const TArray<FAssetData>& Select
 			}
 		}
 		MetadataObj->SetArrayField(TEXT("dependencies"), DepsArray);
+		
+		// 标记是否为用户选中的资产（主资产 vs 依赖资产）
+		const bool bIsSelected = UserSelectedPackages.Contains(PackageName);
+		MetadataObj->SetBoolField(TEXT("is_selected"), bIsSelected);
 		
 		// 获取文件大小
 		if (!Filename.IsEmpty())

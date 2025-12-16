@@ -12,6 +12,7 @@
 #include "UAL_CommandHandler.h"
 #include "UAL_LogInterceptor.h"
 #include "UAL_ContentBrowserExt.h"
+#include "UAL_LevelViewportExt.h"
 #include "Async/Async.h"
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"
@@ -42,6 +43,7 @@ void FUnrealAgentLinkModule::StartupModule()
 	CommandHandler = MakeUnique<FUAL_CommandHandler>();
 	LogInterceptor = MakeShared<FUAL_LogInterceptor>();
 	ContentBrowserExt = MakeUnique<FUAL_ContentBrowserExt>();
+	LevelViewportExt = MakeUnique<FUAL_LevelViewportExt>();
 
 	if (GLog && LogInterceptor.IsValid())
 	{
@@ -58,6 +60,12 @@ void FUnrealAgentLinkModule::StartupModule()
 	if (ContentBrowserExt)
 	{
 		ContentBrowserExt->Register();
+	}
+
+	// 注册视口Actor右键菜单扩展
+	if (LevelViewportExt)
+	{
+		LevelViewportExt->Register();
 	}
 }
 
@@ -112,6 +120,12 @@ void FUnrealAgentLinkModule::ShutdownModule()
 	{
 		ContentBrowserExt->Unregister();
 		ContentBrowserExt.Reset();
+	}
+
+	if (LevelViewportExt)
+	{
+		LevelViewportExt->Unregister();
+		LevelViewportExt.Reset();
 	}
 }
 
