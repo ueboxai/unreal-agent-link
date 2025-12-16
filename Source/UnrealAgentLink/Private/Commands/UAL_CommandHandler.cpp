@@ -64,10 +64,13 @@ void FUAL_CommandHandler::ProcessMessage(const FString& JsonPayload)
 	}
 	else if (Type == TEXT("res"))
 	{
-		// JSON-RPC 风格：result；兼容旧字段 data
+		// JSON-RPC 风格：result；兼容旧字段 data；以及 payload 可能也被用于响应
 		if (!Root->TryGetObjectField(TEXT("result"), ParamsObj))
 		{
-			Root->TryGetObjectField(TEXT("data"), ParamsObj);
+			if (!Root->TryGetObjectField(TEXT("data"), ParamsObj))
+			{
+				Root->TryGetObjectField(TEXT("payload"), ParamsObj);
+			}
 		}
 	}
 
@@ -112,8 +115,11 @@ void FUAL_CommandHandler::RegisterCommands()
 
 void FUAL_CommandHandler::Handle_Response(const FString& Method, const TSharedPtr<FJsonObject>& Payload)
 {
+	UE_LOG(LogUALCommand, Log, TEXT("Handle_Response: Method=%s"), *Method);
+
 	if (!Payload.IsValid())
 	{
+		UE_LOG(LogUALCommand, Warning, TEXT("Handle_Response: Payload is invalid"));
 		return;
 	}
 
@@ -134,6 +140,9 @@ void FUAL_CommandHandler::Handle_Response(const FString& Method, const TSharedPt
 
 	const bool bIsImportFolder = Method == TEXT("content.import_folder");
 	const bool bIsImportAssets = Method == TEXT("content.import_assets");
+	
+	UE_LOG(LogUALCommand, Log, TEXT("Handle_Response: bIsImportFolder=%d, bIsImportAssets=%d"), bIsImportFolder, bIsImportAssets);
+
 	if (!bIsImportFolder && !bIsImportAssets)
 	{
 		return; // 非导入相关响应不提示
@@ -156,6 +165,7 @@ void FUAL_CommandHandler::Handle_Response(const FString& Method, const TSharedPt
 		{
 			Body = FString::Printf(TEXT("%s: %d"),
 				*UAL_CommandUtils::LStr(TEXT("成功"), TEXT("Succeeded")),
+				*UAL_CommandUtils::LStr(TEXT("资产已导入"), TEXT("Asset(s) imported")),
 				Count);
 		}
 	}
@@ -170,33 +180,49 @@ void FUAL_CommandHandler::Handle_Response(const FString& Method, const TSharedPt
 			*Error);
 	}
 
-	FNotificationInfo Info(FText::FromString(Title));
-	Info.SubText = FText::FromString(Body);
-	Info.ExpireDuration = 4.0f;
-	Info.FadeOutDuration = 0.5f;
-	Info.bUseThrobber = false;
-	Info.bFireAndForget = true;
+	UE_LOG(LogUALCommand, Log, TEXT("Handle_Response: Showing notification. Title=%s, Body=%s"), *Title, *Body);
+
+	// Ensure run on game thread
+	AsyncTask(ENamedThreads::GameThread, [Title, Body, bOk]()
+	{
+		FNotificationInfo Info(FText::FromString(Title));
+		Info.SubText = FText::FromString(Body);
+		Info.ExpireDuration = 5.0f;
+		Info.FadeOutDuration = 1.0f;
+		Info.bUseThrobber = false;
+		Info.bFireAndForget = true;
+		Info.bUseLargeFont = false;
 
 #if WITH_EDITOR
-	TSharedPtr<SNotificationItem> Notification;
-	if (FSlateApplication::IsInitialized())
-	{
-		Notification = FSlateNotificationManager::Get().AddNotification(Info);
-		if (Notification.IsValid())
+		TSharedPtr<SNotificationItem> Notification;
+		if (FSlateApplication::IsInitialized())
 		{
-			Notification->SetCompletionState(bOk ? SNotificationItem::CS_Success : SNotificationItem::CS_Fail);
+			Notification = FSlateNotificationManager::Get().AddNotification(Info);
+			if (Notification.IsValid())
+			{
+				Notification->SetCompletionState(bOk ? SNotificationItem::CS_Success : SNotificationItem::CS_Fail);
+				UE_LOG(LogUALCommand, Log, TEXT("Handle_Response: Notification created successfully"));
+			}
+			else
+			{
+				UE_LOG(LogUALCommand, Warning, TEXT("Handle_Response: Notification creation failed (Notification is invalid)"));
+			}
 		}
-	}
+		else
+		{
+			UE_LOG(LogUALCommand, Warning, TEXT("Handle_Response: SlateApplication not initialized"));
+		}
 
-	if (!Notification.IsValid())
-	{
-		const FText DialogText = FText::Format(
-			FText::FromString(TEXT("{0}\n{1}")),
-			FText::FromString(Title),
-			FText::FromString(Body));
-		FMessageDialog::Open(EAppMsgType::Ok, DialogText);
-	}
+		if (!Notification.IsValid())
+		{
+			const FText DialogText = FText::Format(
+				FText::FromString(TEXT("{0}\n{1}")),
+				FText::FromString(Title),
+				FText::FromString(Body));
+			FMessageDialog::Open(EAppMsgType::Ok, DialogText);
+		}
 #else
-	FSlateNotificationManager::Get().AddNotification(Info);
+		FSlateNotificationManager::Get().AddNotification(Info);
 #endif
+	});
 }

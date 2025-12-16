@@ -18,6 +18,9 @@
 #include "Engine/Texture2D.h"
 #include "UObject/SavePackage.h"
 #include "Misc/PackageName.h"
+#include "Framework/Notifications/NotificationManager.h"
+#include "Widgets/Notifications/SNotificationList.h"
+#include "Async/Async.h"
 
 // 使用独立的 Log Category 名称，避免与 UAL_ContentBrowserExt 冲突
 DEFINE_LOG_CATEGORY_STATIC(LogUALContentCmd, Log, All);
@@ -310,6 +313,35 @@ void FUAL_ContentBrowserCommands::Handle_ImportAssets(
 		}
 	}
 	
+	// Show notification (Ensure logic runs on GameThread)
+	if (SuccessCount > 0)
+	{
+		// Capture by value
+		AsyncTask(ENamedThreads::GameThread, [SuccessCount]()
+		{
+			UE_LOG(LogUALContentCmd, Log, TEXT("Handle_ImportAssets: Attempting to show success notification for %d assets"), SuccessCount);
+
+			FString Title = UAL_CommandUtils::LStr(TEXT("导入成功"), TEXT("Import Successful"));
+			FString Msg = FString::Printf(TEXT("%s: %d"), *UAL_CommandUtils::LStr(TEXT("成功导入资产数"), TEXT("Assets imported")), SuccessCount);
+			
+			FNotificationInfo Info(FText::FromString(Title));
+			Info.SubText = FText::FromString(Msg);
+			Info.ExpireDuration = 3.0f;
+			Info.bFireAndForget = true;
+			Info.bUseLargeFont = false;
+			
+			TSharedPtr<SNotificationItem> NotificationItem = FSlateNotificationManager::Get().AddNotification(Info);
+			if (NotificationItem.IsValid())
+			{
+				NotificationItem->SetCompletionState(SNotificationItem::CS_Success);
+			}
+			else
+			{
+				UE_LOG(LogUALContentCmd, Warning, TEXT("Handle_ImportAssets: Failed to create notification item"));
+			}
+		});
+	}
+
 	// 返回结果
 	TSharedPtr<FJsonObject> Response = MakeShared<FJsonObject>();
 	Response->SetBoolField(TEXT("ok"), SuccessCount > 0);
@@ -995,6 +1027,35 @@ void FUAL_ContentBrowserCommands::Handle_NormalizedImport(
 	FUALNormalizedImportSession Session;
 	
 	bool bSuccess = Importer.ExecuteNormalizedImport(FilePaths, RuleSet, Session);
+
+	// Show notification (Ensure logic runs on GameThread)
+	if (bSuccess && Session.SuccessCount > 0)
+	{
+		int32 Count = Session.SuccessCount; // Capture by value
+		AsyncTask(ENamedThreads::GameThread, [Count]()
+		{
+			UE_LOG(LogUALContentCmd, Log, TEXT("Handle_NormalizedImport: Attempting to show success notification for %d assets"), Count);
+
+			FString Title = UAL_CommandUtils::LStr(TEXT("规范化导入成功"), TEXT("Normalized Import Successful"));
+			FString Msg = FString::Printf(TEXT("%s: %d"), *UAL_CommandUtils::LStr(TEXT("成功处理"), TEXT("Processed")), Count);
+
+			FNotificationInfo Info(FText::FromString(Title));
+			Info.SubText = FText::FromString(Msg);
+			Info.ExpireDuration = 3.0f;
+			Info.bFireAndForget = true;
+			Info.bUseLargeFont = false;
+			
+			TSharedPtr<SNotificationItem> NotificationItem = FSlateNotificationManager::Get().AddNotification(Info);
+			if (NotificationItem.IsValid())
+			{
+				NotificationItem->SetCompletionState(SNotificationItem::CS_Success);
+			}
+			else
+			{
+				UE_LOG(LogUALContentCmd, Warning, TEXT("Handle_NormalizedImport: Failed to create notification item"));
+			}
+		});
+	}
 	
 	// 构建响应
 	TSharedPtr<FJsonObject> Response = MakeShared<FJsonObject>();
