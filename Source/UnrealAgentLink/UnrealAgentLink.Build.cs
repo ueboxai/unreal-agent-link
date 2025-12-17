@@ -82,7 +82,8 @@ public class UnrealAgentLink : ModuleRules
 				"RHI",
 				"GameProjectGeneration",
 				"PropertyEditor", // Added for FPropertyEditorModule
-				"MaterialEditor" // Added for FMaterialEditorUtilities
+				"MaterialEditor", // Added for FMaterialEditorUtilities
+				"MediaAssets" // Added for FileMediaSource support
 			}
 			);
 

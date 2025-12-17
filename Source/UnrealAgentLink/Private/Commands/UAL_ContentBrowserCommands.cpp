@@ -25,9 +25,191 @@
 #include "Framework/Notifications/NotificationManager.h"
 #include "Widgets/Notifications/SNotificationList.h"
 #include "Async/Async.h"
+#include "FileMediaSource.h"
+#include "Misc/FileHelper.h"
 
 // 使用独立的 Log Category 名称，避免与 UAL_ContentBrowserExt 冲突
+// 放在这里以便静态函数可以使用
 DEFINE_LOG_CATEGORY_STATIC(LogUALContentCmd, Log, All);
+
+// 视频文件扩展名集合（这些需要特殊处理：复制到 Movies 目录并创建 FileMediaSource）
+static const TSet<FString> VideoFileExtensions = {
+	TEXT("mp4"), TEXT("mov"), TEXT("avi"), TEXT("wmv"), TEXT("mkv"), TEXT("webm"),
+	TEXT("m4v"), TEXT("flv"), TEXT("3gp"), TEXT("3g2"), TEXT("mxf"), TEXT("ts")
+};
+
+/**
+ * 检查文件是否是视频文件
+ * @param FilePath 文件路径
+ * @return 如果是视频文件返回 true
+ */
+static bool IsVideoFile(const FString& FilePath)
+{
+	const FString Extension = FPaths::GetExtension(FilePath).ToLower();
+	return VideoFileExtensions.Contains(Extension);
+}
+
+/**
+ * 导入视频文件：复制到 Content/Movies 目录并创建 FileMediaSource 资产
+ * 
+ * @param SourceFilePath 源视频文件的绝对路径
+ * @param DestinationPath UE 资产路径（如 /Game/Imported/Media/Video）
+ * @param bOverwrite 是否覆盖已存在的文件
+ * @param NormalizedAssetName 可选的规范化资产名称（如果为空则使用原始文件名）
+ * @param OutImportedAsset 输出：创建的 FileMediaSource 资产
+ * @param OutError 输出：错误信息（如果失败）
+ * @return 如果成功返回 true
+ */
+static bool ImportVideoFile(
+	const FString& SourceFilePath,
+	const FString& DestinationPath,
+	bool bOverwrite,
+	const FString& NormalizedAssetName,
+	UFileMediaSource*& OutImportedAsset,
+	FString& OutError)
+{
+	OutImportedAsset = nullptr;
+	OutError.Empty();
+	
+	// 1. 验证源文件存在
+	if (!FPaths::FileExists(SourceFilePath))
+	{
+		OutError = FString::Printf(TEXT("Source video file not found: %s"), *SourceFilePath);
+		return false;
+	}
+	
+	// 2. 获取项目的 Content/Movies 目录
+	// 注意：使用 FPaths::ProjectDir() 而不是 FPaths::ProjectContentDir()
+	// 因为 ProjectContentDir() 在某些情况下可能返回相对路径导致解析错误
+	const FString ProjectDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+	const FString MoviesDir = FPaths::Combine(ProjectDir, TEXT("Content"), TEXT("Movies"));
+	
+	UE_LOG(LogUALContentCmd, Log, TEXT("Video import - ProjectDir: %s, MoviesDir: %s"), *ProjectDir, *MoviesDir);
+	
+	// 确保 Movies 目录存在
+	IFileManager& FileManager = IFileManager::Get();
+	if (!FileManager.DirectoryExists(*MoviesDir))
+	{
+		if (!FileManager.MakeDirectory(*MoviesDir, true))
+		{
+			OutError = FString::Printf(TEXT("Failed to create Movies directory: %s"), *MoviesDir);
+			return false;
+		}
+		UE_LOG(LogUALContentCmd, Log, TEXT("Created Movies directory: %s"), *MoviesDir);
+	}
+	
+	// 3. 确定资产名称（使用规范化名称或默认生成）
+	FString AssetName;
+	if (!NormalizedAssetName.IsEmpty())
+	{
+		// 使用前端提供的规范化名称
+		AssetName = NormalizedAssetName;
+	}
+	else
+	{
+		// 默认使用 MS_ + 原始文件名
+		AssetName = TEXT("MS_") + FPaths::GetBaseFilename(SourceFilePath);
+	}
+	
+	// 4. 构建目标文件路径（使用规范化名称作为文件名）
+	const FString Extension = FPaths::GetExtension(SourceFilePath);
+	FString TargetFilePath = FPaths::Combine(MoviesDir, AssetName + TEXT(".") + Extension);
+	
+	// 检查目标文件是否已存在
+	if (FPaths::FileExists(TargetFilePath))
+	{
+		if (bOverwrite)
+		{
+			// 删除已存在的文件
+			if (!FileManager.Delete(*TargetFilePath))
+			{
+				OutError = FString::Printf(TEXT("Failed to delete existing file: %s"), *TargetFilePath);
+				return false;
+			}
+		}
+		else
+		{
+			// 生成唯一文件名
+			int32 Counter = 1;
+			FString BaseAssetName = AssetName;
+			do
+			{
+				AssetName = FString::Printf(TEXT("%s_%d"), *BaseAssetName, Counter++);
+				TargetFilePath = FPaths::Combine(MoviesDir, AssetName + TEXT(".") + Extension);
+			} while (FPaths::FileExists(TargetFilePath) && Counter < 1000);
+		}
+	}
+	
+	// 5. 复制视频文件到 Movies 目录
+	UE_LOG(LogUALContentCmd, Log, TEXT("Copying video file: %s -> %s"), *SourceFilePath, *TargetFilePath);
+	
+	const uint32 CopyResult = FileManager.Copy(*TargetFilePath, *SourceFilePath, true);
+	if (CopyResult != COPY_OK)
+	{
+		OutError = FString::Printf(TEXT("Failed to copy video file. Error code: %d"), CopyResult);
+		return false;
+	}
+	
+	// 6. 创建 FileMediaSource 资产
+	// 构建资产包路径
+	FString PackagePath = DestinationPath;
+	if (PackagePath.IsEmpty() || !PackagePath.StartsWith(TEXT("/Game")))
+	{
+		PackagePath = TEXT("/Game/Imported/Media/Video");
+	}
+	
+	const FString FullPackageName = PackagePath / AssetName;
+	
+	// 检查资产是否已存在
+	UPackage* Package = CreatePackage(*FullPackageName);
+	if (!Package)
+	{
+		OutError = FString::Printf(TEXT("Failed to create package: %s"), *FullPackageName);
+		return false;
+	}
+	
+	// 创建 FileMediaSource 对象
+	UFileMediaSource* MediaSource = NewObject<UFileMediaSource>(Package, *AssetName, RF_Public | RF_Standalone);
+	if (!MediaSource)
+	{
+		OutError = TEXT("Failed to create FileMediaSource object");
+		return false;
+	}
+	
+	// 6. 设置 FilePath 属性
+	// 注意：SetFilePath() 会将相对路径解析为绝对路径，但使用的是当前工作目录（引擎 Binaries）作为基准
+	// 所以我们需要直接设置完整的绝对路径 TargetFilePath
+	// UE 在打包时会自动处理路径，将 Content/Movies 下的文件包含进包中
+	MediaSource->SetFilePath(TargetFilePath);
+	
+	UE_LOG(LogUALContentCmd, Log, TEXT("Created FileMediaSource: %s with FilePath: %s"), 
+		*FullPackageName, *TargetFilePath);
+	
+	// 7. 标记包为脏并保存
+	Package->MarkPackageDirty();
+	
+	// 注册到 Asset Registry
+	FAssetRegistryModule::AssetCreated(MediaSource);
+	
+	// 保存资产
+	const FString PackageFileName = FPackageName::LongPackageNameToFilename(
+		FullPackageName, 
+		FPackageName::GetAssetPackageExtension()
+	);
+	
+	FSavePackageArgs SaveArgs;
+	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+	
+	const FSavePackageResultStruct SaveResult = UPackage::Save(Package, MediaSource, *PackageFileName, SaveArgs);
+	if (SaveResult.Result != ESavePackageResult::Success)
+	{
+		UE_LOG(LogUALContentCmd, Warning, TEXT("Failed to save FileMediaSource: %s"), *PackageFileName);
+		// 即使保存失败，资产仍然存在于内存中，用户可以稍后手动保存
+	}
+	
+	OutImportedAsset = MediaSource;
+	return true;
+}
 
 /**
  * 注册所有内容浏览器命令
@@ -162,11 +344,43 @@ void FUAL_ContentBrowserCommands::Handle_ImportAssets(
 	bool bOverwrite = false;
 	Payload->TryGetBoolField(TEXT("overwrite"), bOverwrite);
 	
-	UE_LOG(LogUALContentCmd, Log, TEXT("content.import: %d files -> %s, overwrite=%d"),
-		FilesArray->Num(), *DestinationPath, bOverwrite);
+	// 解析 normalized_names 数组，建立文件名到规范化名称的映射
+	// 格式: [{ "original": "原始文件名.ext", "normalized": "规范化名称" }, ...]
+	TMap<FString, FString> NormalizedNameMap;
+	const TArray<TSharedPtr<FJsonValue>>* NormalizedNamesArray = nullptr;
+	if (Payload->TryGetArrayField(TEXT("normalized_names"), NormalizedNamesArray) && NormalizedNamesArray)
+	{
+		for (const TSharedPtr<FJsonValue>& Item : *NormalizedNamesArray)
+		{
+			const TSharedPtr<FJsonObject>* ItemObj = nullptr;
+			if (Item->TryGetObject(ItemObj) && ItemObj)
+			{
+				FString Original, Normalized;
+				(*ItemObj)->TryGetStringField(TEXT("original"), Original);
+				(*ItemObj)->TryGetStringField(TEXT("normalized"), Normalized);
+				if (!Original.IsEmpty() && !Normalized.IsEmpty())
+				{
+					// 移除扩展名，用文件名（不含扩展名）作为键
+					FString OriginalBaseName = FPaths::GetBaseFilename(Original);
+					NormalizedNameMap.Add(OriginalBaseName, Normalized);
+					UE_LOG(LogUALContentCmd, Log, TEXT("Name mapping: %s -> %s"), *OriginalBaseName, *Normalized);
+				}
+			}
+		}
+	}
 	
-	// 收集文件路径并创建导入任务
-	TArray<UAssetImportTask*> ImportTasks;
+	UE_LOG(LogUALContentCmd, Log, TEXT("content.import: %d files -> %s, overwrite=%d, name_mappings=%d"),
+		FilesArray->Num(), *DestinationPath, bOverwrite, NormalizedNameMap.Num());
+	
+	// 收集导入结果（提前声明，用于汇总视频和普通文件的导入结果）
+	TArray<TSharedPtr<FJsonValue>> ImportedResults;
+	int32 SuccessCount = 0;
+	int32 TotalRequestCount = 0;
+	
+	// === 第一阶段：分离视频文件和其他文件 ===
+	TArray<FString> VideoFiles;
+	TArray<FString> OtherFiles;
+	
 	for (const TSharedPtr<FJsonValue>& FileValue : *FilesArray)
 	{
 		FString FilePath;
@@ -179,78 +393,204 @@ void FUAL_ContentBrowserCommands::Handle_ImportAssets(
 				continue;
 			}
 			
-			// 创建导入任务
-			UAssetImportTask* Task = NewObject<UAssetImportTask>();
-			Task->Filename = FilePath;
-			Task->DestinationPath = DestinationPath;
+			TotalRequestCount++;
 			
-			// 关键设置：禁用所有UI，实现无弹窗导入
-			Task->bAutomated = true;
-			// 不自动保存，避免触发源码管理检出对话框
-			// 资产将保持未保存状态，用户可稍后手动保存
-			Task->bSave = false;
-			Task->bReplaceExisting = bOverwrite;
-			
-			// 获取文件扩展名
-			FString Extension = FPaths::GetExtension(FilePath).ToLower();
-			
-			// 为 FBX 文件配置自动导入选项
-			if (Extension == TEXT("fbx"))
+			// 检查是否是视频文件
+			if (IsVideoFile(FilePath))
 			{
-				UFbxImportUI* ImportUI = NewObject<UFbxImportUI>();
-				
-				// 禁用自动检测，明确指定为静态网格体
-				ImportUI->bAutomatedImportShouldDetectType = false;
-				ImportUI->MeshTypeToImport = FBXIT_StaticMesh;
-				
-				// 自动导入材质和纹理
-				ImportUI->bImportMaterials = true;
-				ImportUI->bImportTextures = true;
-				
-				// 应用到任务
-				Task->Options = ImportUI;
-				
-				UE_LOG(LogUALContentCmd, Log, TEXT("Configured FBX import for: %s"), *FilePath);
+				VideoFiles.Add(FilePath);
+				UE_LOG(LogUALContentCmd, Log, TEXT("Detected video file: %s"), *FilePath);
 			}
-			
-			ImportTasks.Add(Task);
+			else
+			{
+				OtherFiles.Add(FilePath);
+			}
 		}
 	}
 	
-	if (ImportTasks.Num() == 0)
+	// === 第二阶段：导入视频文件（特殊处理） ===
+	if (VideoFiles.Num() > 0)
+	{
+		UE_LOG(LogUALContentCmd, Log, TEXT("Processing %d video file(s) with special import logic..."), VideoFiles.Num());
+		
+		for (const FString& VideoFilePath : VideoFiles)
+		{
+			UFileMediaSource* ImportedMediaSource = nullptr;
+			FString ImportError;
+			
+			// 查找该视频文件的规范化名称
+			FString VideoBaseName = FPaths::GetBaseFilename(VideoFilePath);
+			const FString* NormalizedVideoName = NormalizedNameMap.Find(VideoBaseName);
+			FString FinalVideoAssetName = NormalizedVideoName ? *NormalizedVideoName : FString();
+			
+			if (!FinalVideoAssetName.IsEmpty())
+			{
+				UE_LOG(LogUALContentCmd, Log, TEXT("Video file normalized name: %s -> %s"), *VideoBaseName, *FinalVideoAssetName);
+			}
+			
+			if (ImportVideoFile(VideoFilePath, DestinationPath, bOverwrite, FinalVideoAssetName, ImportedMediaSource, ImportError))
+			{
+				if (ImportedMediaSource)
+				{
+					TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+					Item->SetStringField(TEXT("name"), ImportedMediaSource->GetName());
+					Item->SetStringField(TEXT("path"), ImportedMediaSource->GetPathName());
+					Item->SetStringField(TEXT("class"), TEXT("FileMediaSource"));
+					Item->SetStringField(TEXT("source_file"), VideoFilePath);
+					ImportedResults.Add(MakeShared<FJsonValueObject>(Item));
+					SuccessCount++;
+					
+					UE_LOG(LogUALContentCmd, Log, TEXT("Successfully imported video: %s -> %s"), 
+						*VideoFilePath, *ImportedMediaSource->GetPathName());
+				}
+			}
+			else
+			{
+				UE_LOG(LogUALContentCmd, Error, TEXT("Failed to import video file: %s - %s"), 
+					*VideoFilePath, *ImportError);
+			}
+		}
+	}
+	
+	// === 第三阶段：导入其他文件（标准导入流程） ===
+	TArray<UAssetImportTask*> ImportTasks;
+	
+	for (const FString& FilePath : OtherFiles)
+	{
+		// 创建导入任务
+		UAssetImportTask* Task = NewObject<UAssetImportTask>();
+		Task->Filename = FilePath;
+		Task->DestinationPath = DestinationPath;
+		
+		// 关键设置：禁用所有UI，实现无弹窗导入
+		Task->bAutomated = true;
+		// 不自动保存，避免触发源码管理检出对话框
+		// 资产将保持未保存状态，用户可稍后手动保存
+		Task->bSave = false;
+		Task->bReplaceExisting = bOverwrite;
+		
+		// 获取文件扩展名
+		FString Extension = FPaths::GetExtension(FilePath).ToLower();
+		
+		// 为 FBX 文件配置自动导入选项
+		if (Extension == TEXT("fbx"))
+		{
+			UFbxImportUI* ImportUI = NewObject<UFbxImportUI>();
+			
+			// 禁用自动检测，明确指定为静态网格体
+			ImportUI->bAutomatedImportShouldDetectType = false;
+			ImportUI->MeshTypeToImport = FBXIT_StaticMesh;
+			
+			// 自动导入材质和纹理
+			ImportUI->bImportMaterials = true;
+			ImportUI->bImportTextures = true;
+			
+			// 应用到任务
+			Task->Options = ImportUI;
+			
+			UE_LOG(LogUALContentCmd, Log, TEXT("Configured FBX import for: %s"), *FilePath);
+		}
+		else
+		{
+			UE_LOG(LogUALContentCmd, Log, TEXT("Using default import settings for: %s (Extension: %s)"), *FilePath, *Extension);
+		}
+		
+		ImportTasks.Add(Task);
+	}
+	
+	if (ImportTasks.Num() == 0 && VideoFiles.Num() == 0)
 	{
 		UAL_CommandUtils::SendError(RequestId, 400, TEXT("No valid files to import"));
 		return;
 	}
+	// === 第四阶段：执行标准导入任务 ===
+	if (ImportTasks.Num() > 0)
+	{
+		// 获取 AssetTools
+		FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
+		IAssetTools& AssetTools = AssetToolsModule.Get();
+		
+		// 执行批量导入任务（无弹窗）
+		UE_LOG(LogUALContentCmd, Log, TEXT("Executing %d automated import tasks..."), ImportTasks.Num());
+		AssetTools.ImportAssetTasks(ImportTasks);
+	}
 	
-	// 获取 AssetTools
-	FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
-	IAssetTools& AssetTools = AssetToolsModule.Get();
-	
-	// 执行批量导入任务（无弹窗）
-	UE_LOG(LogUALContentCmd, Log, TEXT("Executing %d automated import tasks..."), ImportTasks.Num());
-	AssetTools.ImportAssetTasks(ImportTasks);
-	
-	// 收集导入结果
-	TArray<TSharedPtr<FJsonValue>> ImportedResults;
+	// 收集标准导入的结果（追加到 ImportedResults）
 	TArray<UTexture2D*> ImportedTextures;
 	TArray<UStaticMesh*> ImportedMeshes;
-	int32 SuccessCount = 0;
 	
 	for (UAssetImportTask* Task : ImportTasks)
 	{
 		// 检查任务是否成功（通过ImportedObjectPaths检查）
 		if (Task->ImportedObjectPaths.Num() > 0)
 		{
+			// 获取源文件名（不含扩展名），用于查找规范化名称
+			const FString SourceBaseName = FPaths::GetBaseFilename(Task->Filename);
+			
 			for (const FString& ObjectPath : Task->ImportedObjectPaths)
 			{
 				// 加载导入的资产
 				UObject* ImportedAsset = LoadObject<UObject>(nullptr, *ObjectPath);
 				if (ImportedAsset)
 				{
+					FString FinalAssetName = ImportedAsset->GetName();
+					FString FinalAssetPath = ImportedAsset->GetPathName();
+					
+					// 检查是否需要重命名（如果有规范化名称映射）
+					// 首先尝试用当前资产名查找，然后尝试用源文件名查找
+					const FString* NormalizedName = NormalizedNameMap.Find(ImportedAsset->GetName());
+					if (!NormalizedName)
+					{
+						NormalizedName = NormalizedNameMap.Find(SourceBaseName);
+					}
+					
+					if (NormalizedName && !NormalizedName->IsEmpty() && *NormalizedName != ImportedAsset->GetName())
+					{
+						UE_LOG(LogUALContentCmd, Log, TEXT("Renaming asset: %s -> %s"), 
+							*ImportedAsset->GetName(), **NormalizedName);
+						
+						// 获取资产所在的包路径
+						FString PackagePath = FPackageName::GetLongPackagePath(ImportedAsset->GetOutermost()->GetName());
+						
+						// 使用 AssetTools 重命名资产
+						FAssetToolsModule& AssetToolsMod = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
+						IAssetTools& AssetToolsRef = AssetToolsMod.Get();
+						
+						TArray<FAssetRenameData> RenameData;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+						// UE 5.1+ 使用 SoftObjectPath
+						FAssetRegistryModule& AssetRegistryMod = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+						IAssetRegistry& AssetReg = AssetRegistryMod.Get();
+						FAssetData AssetData = AssetReg.GetAssetByObjectPath(FSoftObjectPath(ObjectPath));
+						if (AssetData.IsValid())
+						{
+							RenameData.Add(FAssetRenameData(AssetData.ToSoftObjectPath(), PackagePath, *NormalizedName));
+						}
+#else
+						// UE 5.0 使用 UObject*
+						RenameData.Add(FAssetRenameData(ImportedAsset, PackagePath, *NormalizedName));
+#endif
+						
+						if (RenameData.Num() > 0)
+						{
+							bool bRenameSuccess = AssetToolsRef.RenameAssets(RenameData);
+							if (bRenameSuccess)
+							{
+								FinalAssetName = *NormalizedName;
+								FinalAssetPath = PackagePath / *NormalizedName;
+								UE_LOG(LogUALContentCmd, Log, TEXT("Successfully renamed asset to: %s"), *FinalAssetPath);
+							}
+							else
+							{
+								UE_LOG(LogUALContentCmd, Warning, TEXT("Failed to rename asset: %s -> %s"), 
+									*ImportedAsset->GetName(), **NormalizedName);
+							}
+						}
+					}
+					
 					TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
-					Item->SetStringField(TEXT("name"), ImportedAsset->GetName());
-					Item->SetStringField(TEXT("path"), ImportedAsset->GetPathName());
+					Item->SetStringField(TEXT("name"), FinalAssetName);
+					Item->SetStringField(TEXT("path"), FinalAssetPath);
 					Item->SetStringField(TEXT("class"), ImportedAsset->GetClass()->GetName());
 					ImportedResults.Add(MakeShared<FJsonValueObject>(Item));
 					SuccessCount++;
@@ -350,8 +690,12 @@ void FUAL_ContentBrowserCommands::Handle_ImportAssets(
 	// 返回结果
 	TSharedPtr<FJsonObject> Response = MakeShared<FJsonObject>();
 	Response->SetBoolField(TEXT("ok"), SuccessCount > 0);
+	if (SuccessCount == 0)
+	{
+		Response->SetStringField(TEXT("error"), TEXT("Failed to import assets. Possible reasons: 1) File type not supported by installed plugins, 2) Invalid file path. Check Output Log for details."));
+	}
 	Response->SetNumberField(TEXT("imported_count"), SuccessCount);
-	Response->SetNumberField(TEXT("requested_count"), ImportTasks.Num());
+	Response->SetNumberField(TEXT("requested_count"), TotalRequestCount);
 	Response->SetArrayField(TEXT("imported"), ImportedResults);
 	
 	UAL_CommandUtils::SendResponse(RequestId, 200, Response);
