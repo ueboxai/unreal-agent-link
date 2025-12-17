@@ -13,6 +13,8 @@
 #if defined(STATS) && STATS
 extern ENGINE_API float GAverageFPS;
 extern ENGINE_API float GAverageMS;
+// UE 5.1+ 正式支持扩展统计变量（ENGINE_API导出）
+// UE 5.0 中这些变量可能存在于引擎内部但未导出，无法直接访问
 #if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
 #define UAL_WITH_EXTENDED_AVG_STATS 1
 extern ENGINE_API float GAverageGameTime;
@@ -20,6 +22,9 @@ extern ENGINE_API float GAverageDrawTime;
 extern ENGINE_API float GAverageRHITTime;
 extern ENGINE_API float GAverageGPUTime;
 #else
+// UE 5.0: 这些变量在引擎中可能存在但未通过ENGINE_API导出
+// 直接声明会导致链接错误，因此无法在5.0中直接访问
+// 用户可以通过 stat unit 等控制台命令查看这些信息
 #define UAL_WITH_EXTENDED_AVG_STATS 0
 #endif
 #else
@@ -129,12 +134,28 @@ void FUAL_SystemCommands::Handle_GetPerformanceStats(const TSharedPtr<FJsonObjec
 	Fps = GAverageFPS;
 	FrameMs = GAverageMS;
 #if UAL_WITH_EXTENDED_AVG_STATS
+	// UE 5.1+: 使用正式导出的扩展统计变量
 	GameThreadMs = GAverageGameTime;
 	RenderThreadMs = GAverageDrawTime;
 	RHIMs = GAverageRHITTime;
 	GPUMs = GAverageGPUTime;
 #else
-	GameThreadMs = FrameMs;
+	// UE 5.0: 扩展统计变量未通过ENGINE_API导出，无法直接访问
+	// 这些变量在引擎内部可能存在，但由于未导出，插件无法访问
+	// 因此 RenderThreadMs、RHIMs、GPUMs 将保持为 0
+	// 
+	// 说明：
+	// - 这是UE 5.0的限制，不是插件的问题
+	// - 用户可以通过控制台命令查看这些信息：
+	//   * stat unit - 显示所有线程和GPU时间
+	//   * stat scenerendering - 显示场景渲染统计
+	//   * stat rhi - 显示RHI线程统计
+	//   * stat game - 显示游戏线程统计
+	// - 在UE 5.1+中，这些值可以正常获取
+	GameThreadMs = FrameMs; // 使用FrameMs作为GameThreadMs的近似值
+	RenderThreadMs = 0.0f;   // UE 5.0中无法获取，保持为0
+	RHIMs = 0.0f;           // UE 5.0中无法获取，保持为0
+	GPUMs = 0.0f;           // UE 5.0中无法获取，保持为0
 #endif
 #else
 	const float DeltaSeconds = FApp::GetDeltaTime();
