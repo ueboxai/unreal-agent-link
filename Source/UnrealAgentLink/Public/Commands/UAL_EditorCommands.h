@@ -33,7 +33,10 @@ public:
 	
 	// project.analyze_uproject - 分析 .uproject 文件，返回模块和插件信息
 	static void Handle_AnalyzeUProject(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
-	
+
+	// editor.capture_app_window - 截取整个编辑器应用窗口（Slate）
+	static void Handle_CaptureAppWindow(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
 	// 构建项目信息（公开给外部使用）
 public:
 	static TSharedPtr<FJsonObject> BuildProjectInfo();

@@ -83,7 +83,9 @@ public class UnrealAgentLink : ModuleRules
 				"GameProjectGeneration",
 				"PropertyEditor", // Added for FPropertyEditorModule
 				"MaterialEditor", // Added for FMaterialEditorUtilities
-				"MediaAssets" // Added for FileMediaSource support
+				"MediaAssets", // Added for FileMediaSource support
+				"ImageWrapper",  // Added for screenshot support
+				"UMG" // Added for FWidgetRenderer
 			}
 			);
 

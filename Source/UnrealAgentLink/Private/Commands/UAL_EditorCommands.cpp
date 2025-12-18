@@ -5,6 +5,8 @@
 #include "Engine/World.h"
 #include "Engine/GameViewportClient.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Widgets/SWindow.h"
+#include "Slate/SceneViewport.h"
 #include "HighResScreenshot.h"
 #include "IImageWrapper.h"
 #include "IImageWrapperModule.h"
@@ -18,6 +20,15 @@
 #include "UAL_VersionCompat.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
+#include "Slate/WidgetRenderer.h"
+#include "Engine/TextureRenderTarget2D.h"
+#include "Kismet/KismetRenderingLibrary.h"
+
+#if PLATFORM_WINDOWS
+#include "Windows/AllowWindowsPlatformTypes.h"
+#include <Windows.h>
+#include "Windows/HideWindowsPlatformTypes.h"
+#endif
 
 DEFINE_LOG_CATEGORY_STATIC(LogUALEditor, Log, All);
 
@@ -57,6 +68,11 @@ void FUAL_EditorCommands::RegisterCommands(TMap<FString, TFunction<void(const TS
 	CommandMap.Add(TEXT("project.analyze_uproject"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
 	{
 		Handle_AnalyzeUProject(Payload, RequestId);
+	});
+
+	CommandMap.Add(TEXT("editor.capture_app_window"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_CaptureAppWindow(Payload, RequestId);
 	});
 }
 
@@ -711,5 +727,154 @@ void FUAL_EditorCommands::Handle_AnalyzeUProject(const TSharedPtr<FJsonObject>& 
 	}
 
 	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
+}
+
+void FUAL_EditorCommands::Handle_CaptureAppWindow(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+    // --- 前半部分逻辑保持不变 (获取 SlateApp, 查找 TargetWindow) ---
+    if (!FSlateApplication::IsInitialized()) {
+		UAL_CommandUtils::SendError(RequestId, 500, TEXT("Slate Application is not initialized"));
+		return;
+	}
+    FSlateApplication& SlateApp = FSlateApplication::Get();
+    TSharedPtr<SWindow> TargetWindow = SlateApp.GetActiveTopLevelWindow();
+
+    // 容错：如果没有活跃窗口，找第一个交互窗口
+    if (!TargetWindow.IsValid())
+    {
+        TArray<TSharedRef<SWindow>> Windows = SlateApp.GetInteractiveTopLevelWindows();
+        if (Windows.Num() > 0) TargetWindow = Windows[0];
+    }
+
+    if (!TargetWindow.IsValid())
+    {
+        UAL_CommandUtils::SendError(RequestId, 404, TEXT("No valid window to capture"));
+        return;
+    }
+
+    // 确保窗口是可见的
+	// Check IsMinimized via NativeWindow if possible
+	if (TargetWindow->GetNativeWindow().IsValid() && TargetWindow->GetNativeWindow()->IsMinimized())
+	{
+		TargetWindow->Restore();
+	}
+    TargetWindow->BringToFront();
+	
+	if (TargetWindow->GetNativeWindow().IsValid())
+	{
+		TargetWindow->GetNativeWindow()->SetWindowFocus();
+	}
+    
+    // --- 使用 Windows GDI API 直接截取窗口，避免 HDR/Gamma 问题 ---
+#if PLATFORM_WINDOWS
+    // 获取原生窗口句柄
+    HWND Hwnd = nullptr;
+    if (TargetWindow->GetNativeWindow().IsValid())
+    {
+        Hwnd = static_cast<HWND>(TargetWindow->GetNativeWindow()->GetOSWindowHandle());
+    }
+    
+    if (!Hwnd)
+    {
+        UAL_CommandUtils::SendError(RequestId, 500, TEXT("Failed to get native window handle"));
+        return;
+    }
+
+    // 获取窗口客户区大小
+    RECT ClientRect;
+    GetClientRect(Hwnd, &ClientRect);
+    int32 Width = ClientRect.right - ClientRect.left;
+    int32 Height = ClientRect.bottom - ClientRect.top;
+    FIntPoint TargetSize(Width, Height);
+
+    if (Width <= 0 || Height <= 0)
+    {
+        UAL_CommandUtils::SendError(RequestId, 500, TEXT("Invalid window size"));
+        return;
+    }
+
+    // 创建兼容 DC 和位图
+    HDC WindowDC = GetDC(Hwnd);
+    HDC MemDC = CreateCompatibleDC(WindowDC);
+    HBITMAP HBitmap = CreateCompatibleBitmap(WindowDC, Width, Height);
+    HBITMAP OldBitmap = (HBITMAP)SelectObject(MemDC, HBitmap);
+
+    // 使用 PrintWindow 捕获窗口内容（包括 DWM 合成的内容）
+    // PW_RENDERFULLCONTENT (0x00000002) 可以捕获 DWM 合成内容
+    PrintWindow(Hwnd, MemDC, 0x00000002);
+
+    // 准备位图信息
+    BITMAPINFO BitmapInfo;
+    ZeroMemory(&BitmapInfo, sizeof(BITMAPINFO));
+    BitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    BitmapInfo.bmiHeader.biWidth = Width;
+    BitmapInfo.bmiHeader.biHeight = -Height; // 负值表示自上而下
+    BitmapInfo.bmiHeader.biPlanes = 1;
+    BitmapInfo.bmiHeader.biBitCount = 32;
+    BitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+    // 读取像素数据
+    TArray<FColor> Bitmap;
+    Bitmap.SetNum(Width * Height);
+    GetDIBits(MemDC, HBitmap, 0, Height, Bitmap.GetData(), &BitmapInfo, DIB_RGB_COLORS);
+
+    // 清理 GDI 资源
+    SelectObject(MemDC, OldBitmap);
+    DeleteObject(HBitmap);
+    DeleteDC(MemDC);
+    ReleaseDC(Hwnd, WindowDC);
+
+    // GDI 返回 BGRA，但 Alpha 通常为 0，需要修正
+    for (FColor& Pixel : Bitmap)
+    {
+        Pixel.A = 255;
+    }
+#else
+    UAL_CommandUtils::SendError(RequestId, 500, TEXT("Window capture is only supported on Windows"));
+    return;
+#endif
+
+    // PNG 编码与保存
+
+    // 7. 编码与保存 (复制你原本的代码即可)
+    IImageWrapperModule& ImageWrapperModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
+    TSharedPtr<IImageWrapper> ImageWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::PNG);
+
+    if (ImageWrapper.IsValid() && ImageWrapper->SetRaw(Bitmap.GetData(), Bitmap.Num() * sizeof(FColor), TargetSize.X, TargetSize.Y, ERGBFormat::BGRA, 8))
+    {
+        TArray64<uint8> CompressedData = ImageWrapper->GetCompressed();
+        
+        // ... (文件名处理代码) ...
+        FString DesiredName;
+        Payload->TryGetStringField(TEXT("filepath"), DesiredName);
+        FString CleanName = FPaths::GetCleanFilename(DesiredName);
+        if (CleanName.IsEmpty()) CleanName = FDateTime::Now().ToString(TEXT("UAL_AppShot_%Y%m%d_%H%M%S.png"));
+        
+        FString OutputDir = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots/UAL")));
+        IFileManager::Get().MakeDirectory(*OutputDir, true);
+        FString OutputPath = DesiredName.IsEmpty() || FPaths::IsRelative(DesiredName) ? 
+             FPaths::Combine(OutputDir, CleanName) : DesiredName;
+             
+        // 自动创建目录
+		if (!DesiredName.IsEmpty() && !FPaths::IsRelative(DesiredName))
+		{
+			IFileManager::Get().MakeDirectory(*FPaths::GetPath(OutputPath), true);
+		}
+
+        if (FFileHelper::SaveArrayToFile(CompressedData, *OutputPath))
+        {
+            // 构建成功返回 JSON
+            TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+            Data->SetStringField(TEXT("path"), OutputPath);
+			Data->SetStringField(TEXT("filename"), CleanName);
+            Data->SetNumberField(TEXT("width"), TargetSize.X);
+            Data->SetNumberField(TEXT("height"), TargetSize.Y);
+            Data->SetBoolField(TEXT("saved"), true);
+            UAL_CommandUtils::SendResponse(RequestId, 200, Data);
+            return;
+        }
+    }
+
+    UAL_CommandUtils::SendError(RequestId, 500, TEXT("Failed to save image"));
 }
 
