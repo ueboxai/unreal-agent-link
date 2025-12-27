@@ -8,7 +8,7 @@
  * 管理 UE 编辑器内的文件与文件夹结构
  * 
  * 包含 5 个原子工具（CRUD + Describe）:
- * - content.search   : 搜索资产路径、类名
+ * - content.search   : 搜索/浏览资产（支持通配符 "*" 列出所有资产）
  * - content.import   : 导入外部文件 (FBX/PNG/WAV 等)
  * - content.move     : 移动/重命名资产
  * - content.delete   : 删除资产/文件夹
@@ -30,10 +30,15 @@ public:
 	// ========================================================================
 	
 	/**
-	 * content.search - 搜索资产
-	 * 在 Content Browser 中查找匹配的资产路径
+	 * content.search - 搜索/浏览资产
+	 * 在 Content Browser 中查找匹配的资产路径，支持通配符查询
 	 * 
-	 * @param Payload 请求参数 (query, filter_class, limit)
+	 * @param Payload 请求参数:
+	 *   - query: 搜索关键词（可选，默认 "*" 列出所有资产）
+	 *   - path: 目录路径限制，如 /Game/Blueprints（可选）
+	 *   - filter_class: 类型过滤，如 Material, StaticMesh（可选）
+	 *   - include_folders: 是否返回文件夹信息（可选，默认 false）
+	 *   - limit: 返回数量限制（可选，默认 100，最大 500）
 	 * @param RequestId 请求 ID
 	 */
 	static void Handle_SearchAssets(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);

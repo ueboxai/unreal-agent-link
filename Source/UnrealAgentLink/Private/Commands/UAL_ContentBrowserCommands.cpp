@@ -234,7 +234,14 @@ void FUAL_ContentBrowserCommands::RegisterCommands(
 
 /**
  * content.search - 搜索资产
- * 支持模糊匹配和类型过滤
+ * 支持模糊匹配、类型过滤和目录限制
+ * 
+ * 参数:
+ * - query: 搜索关键词（可选，默认 "*" 列出所有资产，使用 "*" 作为通配符）
+ * - path: 目录路径限制，如 /Game/Blueprints（可选）
+ * - filter_class: 类型过滤（可选）
+ * - include_folders: 是否返回文件夹信息（可选，默认 false）
+ * - limit: 返回数量限制（可选，默认 100，最大 500）
  */
 void FUAL_ContentBrowserCommands::Handle_SearchAssets(
 	const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
@@ -243,21 +250,27 @@ void FUAL_ContentBrowserCommands::Handle_SearchAssets(
 	FString Query;
 	Payload->TryGetStringField(TEXT("query"), Query);
 	
+	// 目录路径限制（新增参数）
+	FString SearchPath;
+	Payload->TryGetStringField(TEXT("path"), SearchPath);
+	
 	FString FilterClass;
 	Payload->TryGetStringField(TEXT("filter_class"), FilterClass);
 	
-	int32 Limit = 50;
+	// 是否返回文件夹信息（新增参数）
+	bool bIncludeFolders = false;
+	Payload->TryGetBoolField(TEXT("include_folders"), bIncludeFolders);
+	
+	// limit 默认 100，最大 500（提升上限）
+	int32 Limit = 100;
 	Payload->TryGetNumberField(TEXT("limit"), Limit);
-	Limit = FMath::Clamp(Limit, 1, 200);
+	Limit = FMath::Clamp(Limit, 1, 500);
 	
-	if (Query.IsEmpty())
-	{
-		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required parameter: query"));
-		return;
-	}
+	// 支持通配符：如果 query 为空或为 "*"，则匹配所有资产
+	bool bMatchAll = Query.IsEmpty() || Query == TEXT("*");
 	
-	UE_LOG(LogUALContentCmd, Log, TEXT("content.search: query=%s, filter_class=%s, limit=%d"),
-		*Query, *FilterClass, Limit);
+	UE_LOG(LogUALContentCmd, Log, TEXT("content.search: query=%s, path=%s, filter_class=%s, include_folders=%d, limit=%d, match_all=%d"),
+		*Query, *SearchPath, *FilterClass, bIncludeFolders, Limit, bMatchAll);
 	
 	// 获取 Asset Registry
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
@@ -267,7 +280,16 @@ void FUAL_ContentBrowserCommands::Handle_SearchAssets(
 	FARFilter Filter;
 	Filter.bRecursivePaths = true;
 	Filter.bRecursiveClasses = true;
-	Filter.PackagePaths.Add(TEXT("/Game"));
+	
+	// 路径限制：优先使用 path 参数，否则默认 /Game
+	if (!SearchPath.IsEmpty() && SearchPath.StartsWith(TEXT("/Game")))
+	{
+		Filter.PackagePaths.Add(FName(*SearchPath));
+	}
+	else
+	{
+		Filter.PackagePaths.Add(TEXT("/Game"));
+	}
 	
 	// 类型过滤 - UE 5.1+ 使用 ClassPaths，5.0 使用 ClassNames
 	if (!FilterClass.IsEmpty())
@@ -283,6 +305,9 @@ void FUAL_ContentBrowserCommands::Handle_SearchAssets(
 	TArray<FAssetData> AssetList;
 	AssetRegistry.GetAssets(Filter, AssetList);
 	
+	// 收集文件夹信息（如果需要）
+	TSet<FString> FolderPaths;
+	
 	// 过滤匹配结果
 	TArray<TSharedPtr<FJsonValue>> Results;
 	for (const FAssetData& Asset : AssetList)
@@ -292,9 +317,12 @@ void FUAL_ContentBrowserCommands::Handle_SearchAssets(
 		const FString AssetName = Asset.AssetName.ToString();
 		const FString PackagePath = Asset.PackageName.ToString();
 		
-		// 模糊匹配: 名称或路径包含查询字符串
-		if (AssetName.Contains(Query, ESearchCase::IgnoreCase) ||
-			PackagePath.Contains(Query, ESearchCase::IgnoreCase))
+		// 通配符匹配或模糊匹配: 名称或路径包含查询字符串
+		bool bMatches = bMatchAll || 
+			AssetName.Contains(Query, ESearchCase::IgnoreCase) ||
+			PackagePath.Contains(Query, ESearchCase::IgnoreCase);
+		
+		if (bMatches)
 		{
 			TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
 			Item->SetStringField(TEXT("name"), AssetName);
@@ -308,6 +336,13 @@ void FUAL_ContentBrowserCommands::Handle_SearchAssets(
 #endif
 			
 			Results.Add(MakeShared<FJsonValueObject>(Item));
+			
+			// 收集文件夹路径
+			if (bIncludeFolders)
+			{
+				FString FolderPath = FPackageName::GetLongPackagePath(PackagePath);
+				FolderPaths.Add(FolderPath);
+			}
 		}
 	}
 	
@@ -317,8 +352,21 @@ void FUAL_ContentBrowserCommands::Handle_SearchAssets(
 	Response->SetNumberField(TEXT("count"), Results.Num());
 	Response->SetArrayField(TEXT("results"), Results);
 	
+	// 如果需要，添加文件夹信息
+	if (bIncludeFolders && FolderPaths.Num() > 0)
+	{
+		TArray<TSharedPtr<FJsonValue>> FolderArray;
+		for (const FString& Folder : FolderPaths)
+		{
+			FolderArray.Add(MakeShared<FJsonValueString>(Folder));
+		}
+		Response->SetArrayField(TEXT("folders"), FolderArray);
+		Response->SetNumberField(TEXT("folder_count"), FolderPaths.Num());
+	}
+	
 	UAL_CommandUtils::SendResponse(RequestId, 200, Response);
 }
+
 
 /**
  * content.import - 导入外部文件
