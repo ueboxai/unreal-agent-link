@@ -3,6 +3,9 @@
 
 #include "Editor.h"
 #include "Engine/World.h"
+#include "LevelEditor.h"
+#include "SLevelViewport.h"
+#include "LevelEditorViewport.h"
 #include "Engine/GameViewportClient.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Widgets/SWindow.h"
@@ -84,162 +87,96 @@ void FUAL_EditorCommands::RegisterCommands(TMap<FString, TFunction<void(const TS
 
 void FUAL_EditorCommands::Handle_TakeScreenshot(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
 {
-	// 1) 选择视口
-	FViewport* Viewport = nullptr;
+	// 使用 HighResShot 控制台命令截图（UE 编辑器内置方式，最可靠）
 #if WITH_EDITOR
-	if (GEditor)
-	{
-		Viewport = GEditor->GetActiveViewport();
-	}
-#endif
-	if (!Viewport && GEngine && GEngine->GameViewport)
-	{
-		Viewport = GEngine->GameViewport->Viewport;
-	}
-
-	if (!Viewport)
-	{
-		UAL_CommandUtils::SendError(RequestId, 404, TEXT("No active viewport to capture"));
-		return;
-	}
-
-	// 参数
-	bool bShowUI = false;
-	Payload->TryGetBoolField(TEXT("show_ui"), bShowUI);
-
-	FIntPoint RequestedSize(0, 0);
+	// 1) 解析分辨率参数
+	int32 Width = 1920;
+	int32 Height = 1080;
 	const TArray<TSharedPtr<FJsonValue>>* Resolution = nullptr;
 	if (Payload->TryGetArrayField(TEXT("resolution"), Resolution) && Resolution && Resolution->Num() == 2)
 	{
-		const int32 Width = (int32)(*Resolution)[0]->AsNumber();
-		const int32 Height = (int32)(*Resolution)[1]->AsNumber();
-		if (Width > 0 && Height > 0)
+		Width = FMath::Max((int32)(*Resolution)[0]->AsNumber(), 64);
+		Height = FMath::Max((int32)(*Resolution)[1]->AsNumber(), 64);
+	}
+	
+	// 2) 获取截图目录，找到最新文件用于对比
+	const FString ScreenshotDir = FPaths::ConvertRelativePathToFull(
+		FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots/WindowsEditor")));
+	IFileManager::Get().MakeDirectory(*ScreenshotDir, true);
+	
+	// 记录执行前目录中已有文件
+	TArray<FString> FilesBefore;
+	IFileManager::Get().FindFiles(FilesBefore, *FPaths::Combine(ScreenshotDir, TEXT("HighresScreenshot*.png")), true, false);
+	
+	// 3) 执行 HighResShot 控制台命令
+	FString Command = FString::Printf(TEXT("HighResShot %dx%d"), Width, Height);
+	UE_LOG(LogUALEditor, Log, TEXT("Executing: %s"), *Command);
+	GEngine->Exec(GEditor->GetWorld(), *Command);
+	
+	// 4) 等待并查找新生成的截图文件（重试机制：每次等待 1s，最多 3 次）
+	FString NewScreenshotPath;
+	const int32 MaxRetries = 3;
+	
+	for (int32 Retry = 0; Retry < MaxRetries; ++Retry)
+	{
+		FPlatformProcess::Sleep(1.0f);
+		FlushRenderingCommands();
+		
+		TArray<FString> FilesAfter;
+		IFileManager::Get().FindFiles(FilesAfter, *FPaths::Combine(ScreenshotDir, TEXT("HighresScreenshot*.png")), true, false);
+		
+		// 查找新增的文件
+		for (const FString& File : FilesAfter)
 		{
-			RequestedSize = FIntPoint(Width, Height);
-		}
-	}
-
-	// 2) 读取像素
-	// 强制刷新编辑器视口，确保画面是最新的
-	if (GEditor)
-	{
-		GEditor->RedrawLevelEditingViewports();
-	}
-	Viewport->Draw(true); // true = bShouldPresent
-	FlushRenderingCommands(); // 确保渲染命令执行完毕
-
-	const FIntPoint SourceSize = Viewport->GetSizeXY();
-
-	TArray<FColor> Bitmap;
-	if (SourceSize.X <= 0 || SourceSize.Y <= 0)
-	{
-		UAL_CommandUtils::SendError(RequestId, 500, TEXT("Invalid viewport size"));
-		return;
-	}
-
-	// 使用 ReadPixels 并处理 Alpha 通道
-	if (!Viewport->ReadPixels(Bitmap, FReadSurfaceDataFlags(), FIntRect()))
-	{
-		UAL_CommandUtils::SendError(RequestId, 500, TEXT("Failed to read viewport pixels"));
-		return;
-	}
-
-	// 检查并填充 Alpha，防止全透明导致黑屏（特别是编辑器视口下）
-	bool bIsTransparent = true;
-	for (const FColor& C : Bitmap)
-	{
-		if (C.A != 0)
-		{
-			bIsTransparent = false;
-			break;
-		}
-	}
-	if (bIsTransparent)
-	{
-		for (FColor& C : Bitmap)
-		{
-			C.A = 255;
-		}
-	}
-
-	FIntPoint TargetSize = SourceSize;
-	if (RequestedSize.X > 0 && RequestedSize.Y > 0)
-	{
-		TargetSize = RequestedSize;
-	}
-
-	// 可选缩放（最近邻，避免额外依赖）
-	if (TargetSize != SourceSize)
-	{
-		TArray<FColor> Scaled;
-		Scaled.SetNum(TargetSize.X * TargetSize.Y);
-
-		for (int32 Y = 0; Y < TargetSize.Y; ++Y)
-		{
-			const int32 SrcY = FMath::Clamp(FMath::FloorToInt((float)Y * SourceSize.Y / TargetSize.Y), 0, SourceSize.Y - 1);
-			for (int32 X = 0; X < TargetSize.X; ++X)
+			if (!FilesBefore.Contains(File))
 			{
-				const int32 SrcX = FMath::Clamp(FMath::FloorToInt((float)X * SourceSize.X / TargetSize.X), 0, SourceSize.X - 1);
-				Scaled[Y * TargetSize.X + X] = Bitmap[SrcY * SourceSize.X + SrcX];
+				NewScreenshotPath = FPaths::Combine(ScreenshotDir, File);
+				break;
 			}
 		}
-
-		Bitmap = MoveTemp(Scaled);
+		
+		// 如果没找到新文件，取最新的
+		if (NewScreenshotPath.IsEmpty() && FilesAfter.Num() > 0)
+		{
+			FilesAfter.Sort([&ScreenshotDir](const FString& A, const FString& B) {
+				return IFileManager::Get().GetTimeStamp(*FPaths::Combine(ScreenshotDir, A)) >
+				       IFileManager::Get().GetTimeStamp(*FPaths::Combine(ScreenshotDir, B));
+			});
+			NewScreenshotPath = FPaths::Combine(ScreenshotDir, FilesAfter[0]);
+		}
+		
+		// 找到文件则跳出
+		if (!NewScreenshotPath.IsEmpty() && FPaths::FileExists(NewScreenshotPath))
+		{
+			UE_LOG(LogUALEditor, Log, TEXT("Screenshot found after %d retries"), Retry + 1);
+			break;
+		}
+		
+		UE_LOG(LogUALEditor, Log, TEXT("Waiting for screenshot... retry %d/%d"), Retry + 1, MaxRetries);
+		NewScreenshotPath.Empty();
 	}
-
-	// 3) PNG 编码
-	IImageWrapperModule& ImageWrapperModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(TEXT("ImageWrapper"));
-	const TSharedPtr<IImageWrapper> PngWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::PNG);
-	if (!PngWrapper.IsValid() || !PngWrapper->SetRaw(Bitmap.GetData(), Bitmap.Num() * sizeof(FColor), TargetSize.X, TargetSize.Y, ERGBFormat::BGRA, 8))
+	
+	if (NewScreenshotPath.IsEmpty() || !FPaths::FileExists(NewScreenshotPath))
 	{
-		UAL_CommandUtils::SendError(RequestId, 500, TEXT("Failed to encode screenshot"));
+		UAL_CommandUtils::SendError(RequestId, 500, TEXT("HighResShot did not generate screenshot file after 3 retries"));
 		return;
 	}
+	
+	UE_LOG(LogUALEditor, Log, TEXT("Screenshot captured: %s"), *NewScreenshotPath);
 
-	TArray<uint8> PngData;
-	if (!UALCompat::GetCompressedPNG(PngWrapper, 100, PngData))
-	{
-		UAL_CommandUtils::SendError(RequestId, 500, TEXT("Failed to encode screenshot"));
-		return;
-	}
-
-	// 4) 路径与文件名
-	FString DesiredName;
-	Payload->TryGetStringField(TEXT("filepath"), DesiredName);
-	FString CleanName = FPaths::GetCleanFilename(DesiredName);
-	if (CleanName.IsEmpty())
-	{
-		CleanName = FDateTime::Now().ToString(TEXT("UAL_Shot_%Y%m%d_%H%M%S"));
-	}
-	if (!CleanName.EndsWith(TEXT(".png")))
-	{
-		CleanName += TEXT(".png");
-	}
-
-	const FString OutputDir = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots/UAL")));
-	IFileManager::Get().MakeDirectory(*OutputDir, true);
-	const FString OutputPath = FPaths::Combine(OutputDir, CleanName);
-
-	const bool bSaved = FFileHelper::SaveArrayToFile(PngData, *OutputPath);
-
-	// 5) Base64 返回 (移除，避免大包传输超时)
-	// const FString Base64Data = FBase64::Encode(PngData);
-
+	// 6) 返回结果
 	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
-	Data->SetStringField(TEXT("path"), OutputPath);
-	Data->SetStringField(TEXT("filename"), CleanName);
-	Data->SetNumberField(TEXT("width"), TargetSize.X);
-	Data->SetNumberField(TEXT("height"), TargetSize.Y);
-	Data->SetBoolField(TEXT("saved"), bSaved);
-	Data->SetBoolField(TEXT("show_ui"), bShowUI);
-	// Data->SetStringField(TEXT("base64"), Base64Data);
-
-	if (!bSaved)
-	{
-		Data->SetStringField(TEXT("save_error"), TEXT("Failed to write screenshot to disk"));
-	}
-
+	Data->SetStringField(TEXT("path"), NewScreenshotPath);
+	Data->SetStringField(TEXT("filename"), FPaths::GetCleanFilename(NewScreenshotPath));
+	Data->SetNumberField(TEXT("width"), Width);
+	Data->SetNumberField(TEXT("height"), Height);
+	Data->SetBoolField(TEXT("saved"), true);
+	
 	UAL_CommandUtils::SendResponse(RequestId, 200, Data);
+#else
+	// 非编辑器模式不支持 HighResShot
+	UAL_CommandUtils::SendError(RequestId, 501, TEXT("HighResShot only available in editor mode"));
+#endif
 }
 
 void FUAL_EditorCommands::Handle_GetProjectInfo(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
