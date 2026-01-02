@@ -104,18 +104,24 @@ void FUAL_EditorCommands::Handle_TakeScreenshot(const TSharedPtr<FJsonObject>& P
 		FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Screenshots/WindowsEditor")));
 	IFileManager::Get().MakeDirectory(*ScreenshotDir, true);
 	
-	// 记录执行前目录中已有文件
+	// 记录执行前目录中已有文件及其时间戳
+	TMap<FString, FDateTime> FilesBeforeMap;
 	TArray<FString> FilesBefore;
 	IFileManager::Get().FindFiles(FilesBefore, *FPaths::Combine(ScreenshotDir, TEXT("HighresScreenshot*.png")), true, false);
+	for (const FString& File : FilesBefore)
+	{
+		FString FullPath = FPaths::Combine(ScreenshotDir, File);
+		FilesBeforeMap.Add(File, IFileManager::Get().GetTimeStamp(*FullPath));
+	}
 	
 	// 3) 执行 HighResShot 控制台命令
 	FString Command = FString::Printf(TEXT("HighResShot %dx%d"), Width, Height);
-	UE_LOG(LogUALEditor, Log, TEXT("Executing: %s"), *Command);
+	UE_LOG(LogUALEditor, Log, TEXT("Executing: %s, files before: %d"), *Command, FilesBefore.Num());
 	GEngine->Exec(GEditor->GetWorld(), *Command);
 	
-	// 4) 等待并查找新生成的截图文件（重试机制：每次等待 1s，最多 3 次）
+	// 4) 等待并查找新生成的截图文件（重试机制：每次等待 1s，最多 15 次覆盖最长 10s+ 的截图时间）
 	FString NewScreenshotPath;
-	const int32 MaxRetries = 3;
+	const int32 MaxRetries = 15;
 	
 	for (int32 Retry = 0; Retry < MaxRetries; ++Retry)
 	{
@@ -125,35 +131,71 @@ void FUAL_EditorCommands::Handle_TakeScreenshot(const TSharedPtr<FJsonObject>& P
 		TArray<FString> FilesAfter;
 		IFileManager::Get().FindFiles(FilesAfter, *FPaths::Combine(ScreenshotDir, TEXT("HighresScreenshot*.png")), true, false);
 		
-		// 查找新增的文件
+		// 策略 1: 优先查找新增的文件名（不在执行前列表中的文件）
 		for (const FString& File : FilesAfter)
 		{
-			if (!FilesBefore.Contains(File))
+			if (!FilesBeforeMap.Contains(File))
 			{
-				NewScreenshotPath = FPaths::Combine(ScreenshotDir, File);
-				break;
+				FString FullPath = FPaths::Combine(ScreenshotDir, File);
+				// 验证文件存在且大小 > 0（确保写入完成）
+				int64 FileSize = IFileManager::Get().FileSize(*FullPath);
+				if (FileSize > 0)
+				{
+					NewScreenshotPath = FullPath;
+					UE_LOG(LogUALEditor, Log, TEXT("Found NEW file: %s (size: %lld)"), *File, FileSize);
+					break;
+				}
 			}
 		}
 		
-		// 如果没找到新文件，取最新的
+		// 策略 2: 如果没有新文件名，查找时间戳被更新的文件（可能覆盖写入）
+		if (NewScreenshotPath.IsEmpty())
+		{
+			for (const FString& File : FilesAfter)
+			{
+				FString FullPath = FPaths::Combine(ScreenshotDir, File);
+				FDateTime CurrentTime = IFileManager::Get().GetTimeStamp(*FullPath);
+				FDateTime* PreviousTime = FilesBeforeMap.Find(File);
+				
+				// 如果时间戳变了，说明文件被更新了
+				if (PreviousTime && CurrentTime > *PreviousTime)
+				{
+					int64 FileSize = IFileManager::Get().FileSize(*FullPath);
+					if (FileSize > 0)
+					{
+						NewScreenshotPath = FullPath;
+						UE_LOG(LogUALEditor, Log, TEXT("Found UPDATED file: %s (size: %lld)"), *File, FileSize);
+						break;
+					}
+				}
+			}
+		}
+		
+		// 策略 3: 兜底 - 按时间戳排序取最新的（处理极端情况）
 		if (NewScreenshotPath.IsEmpty() && FilesAfter.Num() > 0)
 		{
 			FilesAfter.Sort([&ScreenshotDir](const FString& A, const FString& B) {
 				return IFileManager::Get().GetTimeStamp(*FPaths::Combine(ScreenshotDir, A)) >
 				       IFileManager::Get().GetTimeStamp(*FPaths::Combine(ScreenshotDir, B));
 			});
-			NewScreenshotPath = FPaths::Combine(ScreenshotDir, FilesAfter[0]);
+			
+			FString FullPath = FPaths::Combine(ScreenshotDir, FilesAfter[0]);
+			int64 FileSize = IFileManager::Get().FileSize(*FullPath);
+			if (FileSize > 0)
+			{
+				NewScreenshotPath = FullPath;
+				UE_LOG(LogUALEditor, Log, TEXT("Fallback to LATEST file: %s (size: %lld)"), *FilesAfter[0], FileSize);
+			}
 		}
 		
-		// 找到文件则跳出
-		if (!NewScreenshotPath.IsEmpty() && FPaths::FileExists(NewScreenshotPath))
+		// 找到有效文件则跳出
+		if (!NewScreenshotPath.IsEmpty())
 		{
-			UE_LOG(LogUALEditor, Log, TEXT("Screenshot found after %d retries"), Retry + 1);
+			UE_LOG(LogUALEditor, Log, TEXT("Screenshot found after %d retries: %s"), Retry + 1, *NewScreenshotPath);
 			break;
 		}
 		
 		UE_LOG(LogUALEditor, Log, TEXT("Waiting for screenshot... retry %d/%d"), Retry + 1, MaxRetries);
-		NewScreenshotPath.Empty();
 	}
 	
 	if (NewScreenshotPath.IsEmpty() || !FPaths::FileExists(NewScreenshotPath))
