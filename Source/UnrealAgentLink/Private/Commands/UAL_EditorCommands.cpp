@@ -20,6 +20,7 @@
 #include "Misc/EngineVersion.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Interfaces/IPluginManager.h"
+#include "GameMapsSettings.h"
 #include "UAL_VersionCompat.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -250,19 +251,74 @@ TSharedPtr<FJsonObject> FUAL_EditorCommands::BuildProjectInfo()
 
 	Data->SetStringField(TEXT("engineVersion"), FEngineVersion::Current().ToString());
 
-	// GameMaps 设置
-	FString GameDefaultMap;
-	if (GConfig->GetString(TEXT("/Script/EngineSettings.GameMapsSettings"), TEXT("GameDefaultMap"), GameDefaultMap, GGameIni))
+	/**
+	 * ========== 读取 GameMapsSettings 开发心得 (2026-01) ==========
+	 * 
+	 * 【问题背景】
+	 * 需要读取 Project Settings → Maps & Modes 中配置的 GameDefaultMap 等字段。
+	 * 这些配置存储在 Config/DefaultGame.ini 的 [/Script/EngineSettings.GameMapsSettings] section。
+	 * 
+	 * 【坑点1：GConfig 方式无效】
+	 * 尝试使用 GConfig->GetString(Section, Key, Value, GGameIni) 时返回空。
+	 * 原因：GGameIni 指向的是运行时合并后的 Game.ini，而非项目的 DefaultGame.ini。
+	 * 
+	 * 【坑点2：LoadLocalIniFile 加载错误文件】
+	 * FConfigCacheIni::LoadLocalIniFile(ConfigFile, "Game", ...) 加载的是合并后的 Game.ini，
+	 * 不包含 /Script/EngineSettings.GameMapsSettings section。
+	 * 
+	 * 【坑点3：FConfigFile::Read() 只加载部分内容】
+	 * 直接用 FConfigFile::Read(DefaultGame.ini) 只返回 1 个 section (GeneralProjectSettings)，
+	 * 不包含 GameMapsSettings。原因不明，可能与 UE 配置解析机制有关。
+	 * 
+	 * 【坑点4：Section 路径易混淆】
+	 * /Script/EngineSettings.GameMapsSettings  ← DefaultGame.ini 中的格式
+	 * /Script/Engine.GameMapsSettings          ← 不正确
+	 * 两者容易混淆，但都不是根本解决方案。
+	 * 
+	 * 【正确方案：使用 UGameMapsSettings API】
+	 * 引擎内部使用静态方法 UGameMapsSettings::GetGameDefaultMap()。
+	 * 需要：
+	 *   1. 在 Build.cs 添加 "EngineSettings" 模块依赖
+	 *   2. #include "GameMapsSettings.h"
+	 *   3. 调用 UGameMapsSettings::GetGameDefaultMap() 或 GetDefault<UGameMapsSettings>()
+	 * 
+	 * 此方式兼容 UE 5.0 - 5.7，是最可靠的方案。
+	 * ==========================================================
+	 */
+	
+	// GameMaps 设置 - 使用 UGameMapsSettings API（引擎内部使用的方式）
+	FString GameDefaultMap = UGameMapsSettings::GetGameDefaultMap();
+	if (!GameDefaultMap.IsEmpty())
 	{
+		UE_LOG(LogUALEditor, Log, TEXT("GameDefaultMap = %s"), *GameDefaultMap);
 		Data->SetStringField(TEXT("defaultMap"), GameDefaultMap);
 	}
-	FString EditorStartupMap;
-	if (GConfig->GetString(TEXT("/Script/EngineSettings.GameMapsSettings"), TEXT("EditorStartupMap"), EditorStartupMap, GGameIni))
+	else
 	{
-		Data->SetStringField(TEXT("editorStartupMap"), EditorStartupMap);
+		UE_LOG(LogUALEditor, Log, TEXT("GameDefaultMap is not set"));
 	}
 
-	// GeneralProjectSettings
+	// EditorStartupMap - 通过 GetDefault 获取
+	const UGameMapsSettings* GameMapsSettings = GetDefault<UGameMapsSettings>();
+	if (GameMapsSettings)
+	{
+		FString EditorStartupMap = GameMapsSettings->EditorStartupMap.GetLongPackageName();
+		if (!EditorStartupMap.IsEmpty())
+		{
+			UE_LOG(LogUALEditor, Log, TEXT("EditorStartupMap = %s"), *EditorStartupMap);
+			Data->SetStringField(TEXT("editorStartupMap"), EditorStartupMap);
+		}
+
+		// TransitionMap
+		FString TransitionMap = GameMapsSettings->TransitionMap.GetLongPackageName();
+		if (!TransitionMap.IsEmpty())
+		{
+			Data->SetStringField(TEXT("transitionMap"), TransitionMap);
+		}
+	}
+
+
+	// GeneralProjectSettings - 使用 GConfig 读取（兼容所有版本）
 	FString CompanyName;
 	if (GConfig->GetString(TEXT("/Script/EngineSettings.GeneralProjectSettings"), TEXT("CompanyName"), CompanyName, GGameIni))
 	{
@@ -278,6 +334,41 @@ TSharedPtr<FJsonObject> FUAL_EditorCommands::BuildProjectInfo()
 	{
 		Data->SetStringField(TEXT("supportContact"), SupportContact);
 	}
+
+	// 扩展：当前打开的关卡名
+#if WITH_EDITOR
+	if (GEditor && GEditor->GetWorld())
+	{
+		FString CurrentLevelName = GEditor->GetWorld()->GetMapName();
+		Data->SetStringField(TEXT("currentLevelName"), CurrentLevelName);
+		
+		// 当前关卡完整路径
+		FString CurrentLevelPath = GEditor->GetWorld()->GetOutermost()->GetName();
+		Data->SetStringField(TEXT("currentLevelPath"), CurrentLevelPath);
+	}
+#endif
+
+	// 扩展：渲染设置（Nanite/Lumen）
+	FString NaniteEnabled;
+	if (GConfig->GetString(TEXT("/Script/Engine.RendererSettings"), TEXT("r.Nanite.ProjectEnabled"), NaniteEnabled, GEngineIni))
+	{
+		Data->SetBoolField(TEXT("naniteEnabled"), NaniteEnabled.Equals(TEXT("True"), ESearchCase::IgnoreCase) || NaniteEnabled == TEXT("1"));
+	}
+	FString LumenGI;
+	if (GConfig->GetString(TEXT("/Script/Engine.RendererSettings"), TEXT("r.DynamicGlobalIlluminationMethod"), LumenGI, GEngineIni))
+	{
+		// 1 = Lumen, 0 = None/SSGI
+		Data->SetBoolField(TEXT("lumenGIEnabled"), LumenGI == TEXT("1"));
+		Data->SetStringField(TEXT("dynamicGIMethod"), LumenGI);
+	}
+	FString LumenReflections;
+	if (GConfig->GetString(TEXT("/Script/Engine.RendererSettings"), TEXT("r.ReflectionMethod"), LumenReflections, GEngineIni))
+	{
+		// 1 = Lumen, 0 = None, 2 = SSR
+		Data->SetBoolField(TEXT("lumenReflectionsEnabled"), LumenReflections == TEXT("1"));
+		Data->SetStringField(TEXT("reflectionMethod"), LumenReflections);
+	}
+
 
 	// 读取 .uproject 以补充 EngineAssociation、TargetPlatforms、Modules
 	FString ProjectFileContent;

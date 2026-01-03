@@ -86,7 +86,8 @@ public class UnrealAgentLink : ModuleRules
 				"MediaAssets", // Added for FileMediaSource support
 				"ImageWrapper",  // Added for screenshot support
 				"UMG", // Added for FWidgetRenderer
-				"LevelEditor" // Added for SLevelViewport and FLevelEditorViewportClient
+				"LevelEditor", // Added for SLevelViewport and FLevelEditorViewportClient
+				"EngineSettings" // Added for UGameMapsSettings
 			}
 			);
 
