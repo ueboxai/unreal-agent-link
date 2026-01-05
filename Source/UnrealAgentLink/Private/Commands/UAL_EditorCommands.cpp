@@ -40,6 +40,139 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogUALEditor, Log, All);
 
+/**
+ * 截图任务上下文结构体（用于异步定时器回调）
+ */
+struct FScreenshotTaskContext
+{
+	FString RequestId;
+	FString ScreenshotDir;
+	TMap<FString, FDateTime> FilesBeforeMap;
+	FDateTime CommandExecuteTime;
+	int32 Width;
+	int32 Height;
+	int32 RetryCount;
+	int32 MaxRetries;
+	FTimerHandle TimerHandle;
+};
+
+// 静态任务列表（存储正在进行的截图任务）
+static TMap<FString, TSharedPtr<FScreenshotTaskContext>> PendingScreenshotTasks;
+
+/**
+ * 定时器回调：检查截图文件是否生成
+ */
+static void CheckScreenshotFile(FString TaskId)
+{
+	TSharedPtr<FScreenshotTaskContext>* ContextPtr = PendingScreenshotTasks.Find(TaskId);
+	if (!ContextPtr || !ContextPtr->IsValid())
+	{
+		UE_LOG(LogUALEditor, Warning, TEXT("Screenshot task %s not found"), *TaskId);
+		return;
+	}
+	
+	TSharedPtr<FScreenshotTaskContext> Context = *ContextPtr;
+	Context->RetryCount++;
+	
+	UE_LOG(LogUALEditor, Log, TEXT("Checking screenshot... retry %d/%d"), Context->RetryCount, Context->MaxRetries);
+	
+	// 查找新生成的截图文件
+	TArray<FString> FilesAfter;
+	IFileManager::Get().FindFiles(FilesAfter, *FPaths::Combine(Context->ScreenshotDir, TEXT("HighresScreenshot*.png")), true, false);
+	
+	UE_LOG(LogUALEditor, Log, TEXT("Found %d files in dir, BeforeMap has %d entries, CommandTime: %s"), 
+		FilesAfter.Num(), Context->FilesBeforeMap.Num(), *Context->CommandExecuteTime.ToString());
+	
+	FString NewScreenshotPath;
+	
+	// 策略 1: 优先查找新增的文件名
+	for (const FString& File : FilesAfter)
+	{
+		if (!Context->FilesBeforeMap.Contains(File))
+		{
+			FString FullPath = FPaths::Combine(Context->ScreenshotDir, File);
+			FDateTime FileTime = IFileManager::Get().GetTimeStamp(*FullPath);
+			int64 FileSize = IFileManager::Get().FileSize(*FullPath);
+			
+			UE_LOG(LogUALEditor, Log, TEXT("New file candidate: %s, FileTime: %s, Size: %lld, CommandTime: %s"), 
+				*File, *FileTime.ToString(), FileSize, *Context->CommandExecuteTime.ToString());
+			
+			if (FileTime >= Context->CommandExecuteTime && FileSize > 0)
+			{
+				NewScreenshotPath = FullPath;
+				UE_LOG(LogUALEditor, Log, TEXT("Found NEW file: %s (size: %lld)"), *File, FileSize);
+				break;
+			}
+			else
+			{
+				UE_LOG(LogUALEditor, Warning, TEXT("Skipping file %s: FileTime < CommandTime or Size <= 0"), *File);
+			}
+		}
+	}
+	
+	// 策略 2: 查找时间戳被更新的文件
+	if (NewScreenshotPath.IsEmpty())
+	{
+		for (const FString& File : FilesAfter)
+		{
+			FString FullPath = FPaths::Combine(Context->ScreenshotDir, File);
+			FDateTime CurrentTime = IFileManager::Get().GetTimeStamp(*FullPath);
+			FDateTime* PreviousTime = Context->FilesBeforeMap.Find(File);
+			
+			if (PreviousTime && CurrentTime > *PreviousTime && CurrentTime >= Context->CommandExecuteTime)
+			{
+				int64 FileSize = IFileManager::Get().FileSize(*FullPath);
+				if (FileSize > 0)
+				{
+					NewScreenshotPath = FullPath;
+					UE_LOG(LogUALEditor, Log, TEXT("Found UPDATED file: %s (size: %lld)"), *File, FileSize);
+					break;
+				}
+			}
+		}
+	}
+	
+	// 找到文件 - 发送成功响应
+	if (!NewScreenshotPath.IsEmpty())
+	{
+		UE_LOG(LogUALEditor, Log, TEXT("Screenshot captured: %s"), *NewScreenshotPath);
+		
+		TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+		Data->SetStringField(TEXT("path"), NewScreenshotPath);
+		Data->SetStringField(TEXT("filename"), FPaths::GetCleanFilename(NewScreenshotPath));
+		Data->SetNumberField(TEXT("width"), Context->Width);
+		Data->SetNumberField(TEXT("height"), Context->Height);
+		Data->SetBoolField(TEXT("saved"), true);
+		Data->SetBoolField(TEXT("restore_app_window"), true); // 通知客户端恢复应用窗口
+		
+		UAL_CommandUtils::SendResponse(Context->RequestId, 200, Data);
+		
+		// 清理定时器和任务
+		if (GEditor)
+		{
+			GEditor->GetTimerManager()->ClearTimer(Context->TimerHandle);
+		}
+		PendingScreenshotTasks.Remove(TaskId);
+		return;
+	}
+	
+	// 超时 - 发送错误响应
+	if (Context->RetryCount >= Context->MaxRetries)
+	{
+		UE_LOG(LogUALEditor, Error, TEXT("Screenshot timeout after %d retries"), Context->MaxRetries);
+		UAL_CommandUtils::SendError(Context->RequestId, 500, TEXT("HighResShot did not generate screenshot file after timeout"));
+		
+		// 清理定时器和任务
+		if (GEditor)
+		{
+			GEditor->GetTimerManager()->ClearTimer(Context->TimerHandle);
+		}
+		PendingScreenshotTasks.Remove(TaskId);
+		return;
+	}
+	
+	// 继续等待（定时器会自动触发下一次检查）
+}
 void FUAL_EditorCommands::RegisterCommands(TMap<FString, TFunction<void(const TSharedPtr<FJsonObject>&, const FString)>>& CommandMap)
 {
 	CommandMap.Add(TEXT("editor.screenshot"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
@@ -125,143 +258,81 @@ void FUAL_EditorCommands::Handle_TakeScreenshot(const TSharedPtr<FJsonObject>& P
 		FilesBeforeMap.Add(File, IFileManager::Get().GetTimeStamp(*FullPath));
 	}
 	
-	// 3) 记录命令执行时间点（用于验证截图时间戳）
-	FDateTime CommandExecuteTime = FDateTime::UtcNow();
-	UE_LOG(LogUALEditor, Log, TEXT("Command execute time: %s"), *CommandExecuteTime.ToString());
+	// 3) 记录命令执行时间点（使用 UTC 时间与文件系统时间戳一致，减去 2 秒容差避免精度问题）
+	FDateTime CommandExecuteTime = FDateTime::UtcNow() - FTimespan::FromSeconds(2);
+	UE_LOG(LogUALEditor, Log, TEXT("Command execute time (with tolerance): %s"), *CommandExecuteTime.ToString());
+	
+	// 3.5) 将 UE 编辑器窗口恢复并置顶（确保截图时窗口在前台）
+	if (FSlateApplication::IsInitialized())
+	{
+		TSharedPtr<SWindow> MainWindow = FSlateApplication::Get().GetActiveTopLevelWindow();
+		if (!MainWindow.IsValid())
+		{
+			// 如果没有活动窗口，尝试获取第一个顶层窗口
+			TArray<TSharedRef<SWindow>> Windows = FSlateApplication::Get().GetInteractiveTopLevelWindows();
+			if (Windows.Num() > 0)
+			{
+				MainWindow = Windows[0];
+			}
+		}
+		
+		if (MainWindow.IsValid())
+		{
+			// 如果窗口被最小化，先恢复
+			if (MainWindow->GetNativeWindow().IsValid() && MainWindow->GetNativeWindow()->IsMinimized())
+			{
+				MainWindow->Restore();
+			}
+			// 将窗口置顶
+			MainWindow->BringToFront();
+			if (MainWindow->GetNativeWindow().IsValid())
+			{
+				MainWindow->GetNativeWindow()->SetWindowFocus();
+			}
+			UE_LOG(LogUALEditor, Log, TEXT("Editor window brought to front for screenshot"));
+		}
+	}
 	
 	// 4) 执行 HighResShot 控制台命令
 	FString Command = FString::Printf(TEXT("HighResShot %dx%d"), Width, Height);
 	UE_LOG(LogUALEditor, Log, TEXT("Executing: %s, files before: %d"), *Command, FilesBefore.Num());
 	GEngine->Exec(GEditor->GetWorld(), *Command);
 	
-	// 5) 等待并查找新生成的截图文件（重试机制：每次等待 4s，最多 15 次覆盖最长 60s 的截图时间）
-	FString NewScreenshotPath;
-	const int32 MaxRetries = 15;
+	// 5) 创建异步任务上下文并设置定时器（非阻塞）
+	TSharedPtr<FScreenshotTaskContext> Context = MakeShared<FScreenshotTaskContext>();
+	Context->RequestId = RequestId;
+	Context->ScreenshotDir = ScreenshotDir;
+	Context->FilesBeforeMap = FilesBeforeMap;
+	Context->CommandExecuteTime = CommandExecuteTime;
+	Context->Width = Width;
+	Context->Height = Height;
+	Context->RetryCount = 0;
+	Context->MaxRetries = 15;
 	
-	for (int32 Retry = 0; Retry < MaxRetries; ++Retry)
+	// 使用 RequestId 作为任务 ID
+	FString TaskId = RequestId;
+	PendingScreenshotTasks.Add(TaskId, Context);
+	
+	// 设置定时器：每 2 秒检查一次，最多检查 15 次（共 30 秒）
+	if (GEditor)
 	{
-		// 非阻塞等待：使用 Slate 事件泵让 UE 继续处理事件，避免阻塞 Game Thread
-		// 每次循环等待约 50ms，总共等待 4 秒（80 次循环）
-		const int32 TicksPerWait = 80;
-		const float TickInterval = 0.05f; // 50ms
-		for (int32 Tick = 0; Tick < TicksPerWait; ++Tick)
-		{
-			// 处理 Slate 消息和事件（让 UI 响应）
-			if (FSlateApplication::IsInitialized())
-			{
-				FSlateApplication::Get().PumpMessages();
-				FSlateApplication::Get().Tick();
-			}
-			// 短暂让出 CPU（非阻塞）
-			FPlatformProcess::Sleep(TickInterval);
-		}
-		FlushRenderingCommands();
-		
-		TArray<FString> FilesAfter;
-		IFileManager::Get().FindFiles(FilesAfter, *FPaths::Combine(ScreenshotDir, TEXT("HighresScreenshot*.png")), true, false);
-		
-		// 策略 1: 优先查找新增的文件名（不在执行前列表中的文件），且时间戳必须晚于命令执行时间
-		for (const FString& File : FilesAfter)
-		{
-			if (!FilesBeforeMap.Contains(File))
-			{
-				FString FullPath = FPaths::Combine(ScreenshotDir, File);
-				FDateTime FileTime = IFileManager::Get().GetTimeStamp(*FullPath);
-				int64 FileSize = IFileManager::Get().FileSize(*FullPath);
-				
-				// 验证文件时间戳晚于命令执行时间，且文件大小 > 0
-				if (FileTime >= CommandExecuteTime && FileSize > 0)
-				{
-					NewScreenshotPath = FullPath;
-					UE_LOG(LogUALEditor, Log, TEXT("Found NEW file: %s (size: %lld, time: %s)"), *File, FileSize, *FileTime.ToString());
-					break;
-				}
-				else if (FileSize > 0)
-				{
-					UE_LOG(LogUALEditor, Warning, TEXT("Skipping stale NEW file: %s (time: %s < execute: %s)"), *File, *FileTime.ToString(), *CommandExecuteTime.ToString());
-				}
-			}
-		}
-		
-		// 策略 2: 如果没有新文件名，查找时间戳被更新且晚于命令执行时间的文件
-		if (NewScreenshotPath.IsEmpty())
-		{
-			for (const FString& File : FilesAfter)
-			{
-				FString FullPath = FPaths::Combine(ScreenshotDir, File);
-				FDateTime CurrentTime = IFileManager::Get().GetTimeStamp(*FullPath);
-				FDateTime* PreviousTime = FilesBeforeMap.Find(File);
-				
-				// 验证：时间戳变了 且 晚于命令执行时间
-				if (PreviousTime && CurrentTime > *PreviousTime && CurrentTime >= CommandExecuteTime)
-				{
-					int64 FileSize = IFileManager::Get().FileSize(*FullPath);
-					if (FileSize > 0)
-					{
-						NewScreenshotPath = FullPath;
-						UE_LOG(LogUALEditor, Log, TEXT("Found UPDATED file: %s (size: %lld, time: %s)"), *File, FileSize, *CurrentTime.ToString());
-						break;
-					}
-				}
-			}
-		}
-		
-		// 策略 3: 兜底 - 按时间戳排序，取时间戳晚于命令执行时间的最新文件
-		if (NewScreenshotPath.IsEmpty() && FilesAfter.Num() > 0)
-		{
-			FilesAfter.Sort([&ScreenshotDir](const FString& A, const FString& B) {
-				return IFileManager::Get().GetTimeStamp(*FPaths::Combine(ScreenshotDir, A)) >
-				       IFileManager::Get().GetTimeStamp(*FPaths::Combine(ScreenshotDir, B));
-			});
-			
-			// 遍历排序后的文件，找到第一个时间戳晚于命令执行时间的
-			for (const FString& File : FilesAfter)
-			{
-				FString FullPath = FPaths::Combine(ScreenshotDir, File);
-				FDateTime FileTime = IFileManager::Get().GetTimeStamp(*FullPath);
-				int64 FileSize = IFileManager::Get().FileSize(*FullPath);
-				
-				if (FileTime >= CommandExecuteTime && FileSize > 0)
-				{
-					NewScreenshotPath = FullPath;
-					UE_LOG(LogUALEditor, Log, TEXT("Fallback to VALID LATEST file: %s (size: %lld, time: %s)"), *File, FileSize, *FileTime.ToString());
-					break;
-				}
-			}
-			
-			if (NewScreenshotPath.IsEmpty())
-			{
-				UE_LOG(LogUALEditor, Warning, TEXT("All %d files are stale (before command execute time)"), FilesAfter.Num());
-			}
-		}
-		
-		// 找到有效文件则跳出
-		if (!NewScreenshotPath.IsEmpty())
-		{
-			UE_LOG(LogUALEditor, Log, TEXT("Screenshot found after %d retries: %s"), Retry + 1, *NewScreenshotPath);
-			break;
-		}
-		
-		UE_LOG(LogUALEditor, Log, TEXT("Waiting for screenshot... retry %d/%d"), Retry + 1, MaxRetries);
+		GEditor->GetTimerManager()->SetTimer(
+			Context->TimerHandle,
+			FTimerDelegate::CreateLambda([TaskId]() { CheckScreenshotFile(TaskId); }),
+			2.0f,  // 每 2 秒检查一次
+			true,  // 循环
+			2.0f   // 首次延迟 2 秒（给截图时间生成）
+		);
+		UE_LOG(LogUALEditor, Log, TEXT("Screenshot async timer started for request: %s"), *RequestId);
+	}
+	else
+	{
+		UE_LOG(LogUALEditor, Error, TEXT("Failed to get TimerManager"));
+		UAL_CommandUtils::SendError(RequestId, 500, TEXT("Failed to start screenshot timer"));
+		PendingScreenshotTasks.Remove(TaskId);
 	}
 	
-	if (NewScreenshotPath.IsEmpty() || !FPaths::FileExists(NewScreenshotPath))
-	{
-		UAL_CommandUtils::SendError(RequestId, 500, TEXT("HighResShot did not generate screenshot file after 3 retries"));
-		return;
-	}
-	
-	UE_LOG(LogUALEditor, Log, TEXT("Screenshot captured: %s"), *NewScreenshotPath);
-
-	// 6) 返回结果
-	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
-	Data->SetStringField(TEXT("path"), NewScreenshotPath);
-	Data->SetStringField(TEXT("filename"), FPaths::GetCleanFilename(NewScreenshotPath));
-	Data->SetNumberField(TEXT("width"), Width);
-	Data->SetNumberField(TEXT("height"), Height);
-	Data->SetBoolField(TEXT("saved"), true);
-	
-	UAL_CommandUtils::SendResponse(RequestId, 200, Data);
+	// 立即返回，不阻塞（响应将由定时器回调发送）
 #else
 	// 非编辑器模式不支持 HighResShot
 	UAL_CommandUtils::SendError(RequestId, 501, TEXT("HighResShot only available in editor mode"));

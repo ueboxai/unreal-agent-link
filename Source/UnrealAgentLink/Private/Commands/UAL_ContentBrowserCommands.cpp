@@ -577,6 +577,13 @@ void FUAL_ContentBrowserCommands::Handle_ImportAssets(
 			
 			for (const FString& ObjectPath : Task->ImportedObjectPaths)
 			{
+				// 检查路径是否为空
+				if (ObjectPath.IsEmpty())
+				{
+					UE_LOG(LogUALContentCmd, Warning, TEXT("Skipping empty ObjectPath in import task for: %s"), *Task->Filename);
+					continue;
+				}
+				
 				// 加载导入的资产
 				UObject* ImportedAsset = LoadObject<UObject>(nullptr, *ObjectPath);
 				if (ImportedAsset)
