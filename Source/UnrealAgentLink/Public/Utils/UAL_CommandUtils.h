@@ -104,4 +104,11 @@ public:
 	static void SendError(const FString& RequestId, int32 Code, const FString& Message);
 	// 带结构化 details 的错误（更“有人情味”，便于 Agent 自修复）
 	static void SendError(const FString& RequestId, int32 Code, const FString& Message, const TSharedPtr<FJsonObject>& Details);
+
+	/**
+	 * 发送事件通知（无需 RequestId，用于订阅类推送）
+	 * @param Method 事件方法名，如 "messagelog.changed"
+	 * @param Payload 事件数据
+	 */
+	static void SendEvent(const FString& Method, const TSharedPtr<FJsonObject>& Payload);
 };

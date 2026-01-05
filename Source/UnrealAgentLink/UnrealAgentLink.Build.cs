@@ -87,7 +87,8 @@ public class UnrealAgentLink : ModuleRules
 				"ImageWrapper",  // Added for screenshot support
 				"UMG", // Added for FWidgetRenderer
 				"LevelEditor", // Added for SLevelViewport and FLevelEditorViewportClient
-				"EngineSettings" // Added for UGameMapsSettings
+				"EngineSettings", // Added for UGameMapsSettings
+				"MessageLog" // Added for FMessageLogModule (MessageLog commands)
 			}
 			);
 

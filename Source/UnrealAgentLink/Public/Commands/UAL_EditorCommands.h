@@ -37,6 +37,9 @@ public:
 	// editor.capture_app_window - 截取整个编辑器应用窗口（Slate）
 	static void Handle_CaptureAppWindow(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 
+	// editor.get_focus_context - 获取当前焦点编辑器上下文（正在编辑的蓝图/材质/关卡等）
+	static void Handle_GetFocusContext(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
 	// 构建项目信息（公开给外部使用）
 public:
 	static TSharedPtr<FJsonObject> BuildProjectInfo();

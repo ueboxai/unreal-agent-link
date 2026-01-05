@@ -27,6 +27,10 @@
 #include "Slate/WidgetRenderer.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Kismet/KismetRenderingLibrary.h"
+#include "Subsystems/AssetEditorSubsystem.h"
+#include "Engine/Blueprint.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialInstance.h"
 
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
@@ -78,6 +82,12 @@ void FUAL_EditorCommands::RegisterCommands(TMap<FString, TFunction<void(const TS
 	{
 		Handle_CaptureAppWindow(Payload, RequestId);
 	});
+
+	// editor.get_focus_context - 获取当前焦点编辑器上下文（蓝图/材质/关卡等）
+	CommandMap.Add(TEXT("editor.get_focus_context"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_GetFocusContext(Payload, RequestId);
+	});
 }
 
 // ========== 从 UAL_CommandHandler.cpp 迁移以下函数 ==========
@@ -115,41 +125,65 @@ void FUAL_EditorCommands::Handle_TakeScreenshot(const TSharedPtr<FJsonObject>& P
 		FilesBeforeMap.Add(File, IFileManager::Get().GetTimeStamp(*FullPath));
 	}
 	
-	// 3) 执行 HighResShot 控制台命令
+	// 3) 记录命令执行时间点（用于验证截图时间戳）
+	FDateTime CommandExecuteTime = FDateTime::UtcNow();
+	UE_LOG(LogUALEditor, Log, TEXT("Command execute time: %s"), *CommandExecuteTime.ToString());
+	
+	// 4) 执行 HighResShot 控制台命令
 	FString Command = FString::Printf(TEXT("HighResShot %dx%d"), Width, Height);
 	UE_LOG(LogUALEditor, Log, TEXT("Executing: %s, files before: %d"), *Command, FilesBefore.Num());
 	GEngine->Exec(GEditor->GetWorld(), *Command);
 	
-	// 4) 等待并查找新生成的截图文件（重试机制：每次等待 1s，最多 15 次覆盖最长 10s+ 的截图时间）
+	// 5) 等待并查找新生成的截图文件（重试机制：每次等待 4s，最多 15 次覆盖最长 60s 的截图时间）
 	FString NewScreenshotPath;
 	const int32 MaxRetries = 15;
 	
 	for (int32 Retry = 0; Retry < MaxRetries; ++Retry)
 	{
-		FPlatformProcess::Sleep(1.0f);
+		// 非阻塞等待：使用 Slate 事件泵让 UE 继续处理事件，避免阻塞 Game Thread
+		// 每次循环等待约 50ms，总共等待 4 秒（80 次循环）
+		const int32 TicksPerWait = 80;
+		const float TickInterval = 0.05f; // 50ms
+		for (int32 Tick = 0; Tick < TicksPerWait; ++Tick)
+		{
+			// 处理 Slate 消息和事件（让 UI 响应）
+			if (FSlateApplication::IsInitialized())
+			{
+				FSlateApplication::Get().PumpMessages();
+				FSlateApplication::Get().Tick();
+			}
+			// 短暂让出 CPU（非阻塞）
+			FPlatformProcess::Sleep(TickInterval);
+		}
 		FlushRenderingCommands();
 		
 		TArray<FString> FilesAfter;
 		IFileManager::Get().FindFiles(FilesAfter, *FPaths::Combine(ScreenshotDir, TEXT("HighresScreenshot*.png")), true, false);
 		
-		// 策略 1: 优先查找新增的文件名（不在执行前列表中的文件）
+		// 策略 1: 优先查找新增的文件名（不在执行前列表中的文件），且时间戳必须晚于命令执行时间
 		for (const FString& File : FilesAfter)
 		{
 			if (!FilesBeforeMap.Contains(File))
 			{
 				FString FullPath = FPaths::Combine(ScreenshotDir, File);
-				// 验证文件存在且大小 > 0（确保写入完成）
+				FDateTime FileTime = IFileManager::Get().GetTimeStamp(*FullPath);
 				int64 FileSize = IFileManager::Get().FileSize(*FullPath);
-				if (FileSize > 0)
+				
+				// 验证文件时间戳晚于命令执行时间，且文件大小 > 0
+				if (FileTime >= CommandExecuteTime && FileSize > 0)
 				{
 					NewScreenshotPath = FullPath;
-					UE_LOG(LogUALEditor, Log, TEXT("Found NEW file: %s (size: %lld)"), *File, FileSize);
+					UE_LOG(LogUALEditor, Log, TEXT("Found NEW file: %s (size: %lld, time: %s)"), *File, FileSize, *FileTime.ToString());
 					break;
+				}
+				else if (FileSize > 0)
+				{
+					UE_LOG(LogUALEditor, Warning, TEXT("Skipping stale NEW file: %s (time: %s < execute: %s)"), *File, *FileTime.ToString(), *CommandExecuteTime.ToString());
 				}
 			}
 		}
 		
-		// 策略 2: 如果没有新文件名，查找时间戳被更新的文件（可能覆盖写入）
+		// 策略 2: 如果没有新文件名，查找时间戳被更新且晚于命令执行时间的文件
 		if (NewScreenshotPath.IsEmpty())
 		{
 			for (const FString& File : FilesAfter)
@@ -158,21 +192,21 @@ void FUAL_EditorCommands::Handle_TakeScreenshot(const TSharedPtr<FJsonObject>& P
 				FDateTime CurrentTime = IFileManager::Get().GetTimeStamp(*FullPath);
 				FDateTime* PreviousTime = FilesBeforeMap.Find(File);
 				
-				// 如果时间戳变了，说明文件被更新了
-				if (PreviousTime && CurrentTime > *PreviousTime)
+				// 验证：时间戳变了 且 晚于命令执行时间
+				if (PreviousTime && CurrentTime > *PreviousTime && CurrentTime >= CommandExecuteTime)
 				{
 					int64 FileSize = IFileManager::Get().FileSize(*FullPath);
 					if (FileSize > 0)
 					{
 						NewScreenshotPath = FullPath;
-						UE_LOG(LogUALEditor, Log, TEXT("Found UPDATED file: %s (size: %lld)"), *File, FileSize);
+						UE_LOG(LogUALEditor, Log, TEXT("Found UPDATED file: %s (size: %lld, time: %s)"), *File, FileSize, *CurrentTime.ToString());
 						break;
 					}
 				}
 			}
 		}
 		
-		// 策略 3: 兜底 - 按时间戳排序取最新的（处理极端情况）
+		// 策略 3: 兜底 - 按时间戳排序，取时间戳晚于命令执行时间的最新文件
 		if (NewScreenshotPath.IsEmpty() && FilesAfter.Num() > 0)
 		{
 			FilesAfter.Sort([&ScreenshotDir](const FString& A, const FString& B) {
@@ -180,12 +214,24 @@ void FUAL_EditorCommands::Handle_TakeScreenshot(const TSharedPtr<FJsonObject>& P
 				       IFileManager::Get().GetTimeStamp(*FPaths::Combine(ScreenshotDir, B));
 			});
 			
-			FString FullPath = FPaths::Combine(ScreenshotDir, FilesAfter[0]);
-			int64 FileSize = IFileManager::Get().FileSize(*FullPath);
-			if (FileSize > 0)
+			// 遍历排序后的文件，找到第一个时间戳晚于命令执行时间的
+			for (const FString& File : FilesAfter)
 			{
-				NewScreenshotPath = FullPath;
-				UE_LOG(LogUALEditor, Log, TEXT("Fallback to LATEST file: %s (size: %lld)"), *FilesAfter[0], FileSize);
+				FString FullPath = FPaths::Combine(ScreenshotDir, File);
+				FDateTime FileTime = IFileManager::Get().GetTimeStamp(*FullPath);
+				int64 FileSize = IFileManager::Get().FileSize(*FullPath);
+				
+				if (FileTime >= CommandExecuteTime && FileSize > 0)
+				{
+					NewScreenshotPath = FullPath;
+					UE_LOG(LogUALEditor, Log, TEXT("Fallback to VALID LATEST file: %s (size: %lld, time: %s)"), *File, FileSize, *FileTime.ToString());
+					break;
+				}
+			}
+			
+			if (NewScreenshotPath.IsEmpty())
+			{
+				UE_LOG(LogUALEditor, Warning, TEXT("All %d files are stale (before command execute time)"), FilesAfter.Num());
 			}
 		}
 		
@@ -947,4 +993,120 @@ void FUAL_EditorCommands::Handle_CaptureAppWindow(const TSharedPtr<FJsonObject>&
 
     UAL_CommandUtils::SendError(RequestId, 500, TEXT("Failed to save image"));
 }
+
+/**
+ * 获取当前焦点编辑器上下文
+ * 返回正在编辑的资产信息（蓝图、材质、关卡等）
+ */
+void FUAL_EditorCommands::Handle_GetFocusContext(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+#if WITH_EDITOR
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    TSharedPtr<FJsonObject> FocusedEditor = nullptr;
+    TArray<TSharedPtr<FJsonValue>> OpenEditors;
+
+    // 1. 通过 UAssetEditorSubsystem 获取所有打开的资产编辑器
+    if (GEditor)
+    {
+        UAssetEditorSubsystem* AssetEditorSubsystem = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
+        if (AssetEditorSubsystem)
+        {
+            TArray<UObject*> EditedAssets = AssetEditorSubsystem->GetAllEditedAssets();
+            
+            for (UObject* Asset : EditedAssets)
+            {
+                if (!Asset) continue;
+                
+                TSharedPtr<FJsonObject> EditorInfo = MakeShared<FJsonObject>();
+                FString AssetPath = Asset->GetPathName();
+                FString AssetName = Asset->GetName();
+                FString AssetType = TEXT("other");
+                
+                // 识别资产类型
+                if (UBlueprint* Blueprint = Cast<UBlueprint>(Asset))
+                {
+                    AssetType = TEXT("blueprint");
+                    
+                    // 获取蓝图父类
+                    if (Blueprint->ParentClass)
+                    {
+                        EditorInfo->SetStringField(TEXT("parentClass"), Blueprint->ParentClass->GetName());
+                    }
+                    
+                    // 检查是否有未保存的修改
+                    EditorInfo->SetBoolField(TEXT("isModified"), Blueprint->GetOutermost()->IsDirty());
+                }
+                else if (UMaterial* Material = Cast<UMaterial>(Asset))
+                {
+                    AssetType = TEXT("material");
+                    EditorInfo->SetBoolField(TEXT("isModified"), Material->GetOutermost()->IsDirty());
+                }
+                else if (UMaterialInstance* MatInstance = Cast<UMaterialInstance>(Asset))
+                {
+                    AssetType = TEXT("material_instance");
+                    EditorInfo->SetBoolField(TEXT("isModified"), MatInstance->GetOutermost()->IsDirty());
+                    
+                    // 获取父材质
+                    if (MatInstance->Parent)
+                    {
+                        EditorInfo->SetStringField(TEXT("parentMaterial"), MatInstance->Parent->GetPathName());
+                    }
+                }
+                else if (Asset->IsA(UTexture::StaticClass()))
+                {
+                    AssetType = TEXT("texture");
+                }
+                else if (Asset->IsA(UStaticMesh::StaticClass()) || Asset->IsA(USkeletalMesh::StaticClass()))
+                {
+                    AssetType = TEXT("mesh");
+                }
+                
+                EditorInfo->SetStringField(TEXT("type"), AssetType);
+                EditorInfo->SetStringField(TEXT("name"), AssetName);
+                EditorInfo->SetStringField(TEXT("path"), AssetPath);
+                
+                // 第一个编辑的资产作为焦点编辑器（通常是最近打开的）
+                if (!FocusedEditor.IsValid())
+                {
+                    FocusedEditor = EditorInfo;
+                }
+                
+                OpenEditors.Add(MakeShared<FJsonValueObject>(EditorInfo));
+            }
+        }
+    }
+
+    // 2. 如果没有资产编辑器打开，返回当前关卡信息
+    if (!FocusedEditor.IsValid() && GEditor && GEditor->GetWorld())
+    {
+        FocusedEditor = MakeShared<FJsonObject>();
+        FocusedEditor->SetStringField(TEXT("type"), TEXT("level"));
+        FocusedEditor->SetStringField(TEXT("name"), GEditor->GetWorld()->GetMapName());
+        FocusedEditor->SetStringField(TEXT("path"), GEditor->GetWorld()->GetOutermost()->GetName());
+        FocusedEditor->SetBoolField(TEXT("isModified"), GEditor->GetWorld()->GetOutermost()->IsDirty());
+    }
+
+    // 3. 构建返回结果
+    if (FocusedEditor.IsValid())
+    {
+        Result->SetObjectField(TEXT("focusedEditor"), FocusedEditor);
+    }
+    
+    if (OpenEditors.Num() > 0)
+    {
+        Result->SetArrayField(TEXT("openEditors"), OpenEditors);
+    }
+    
+    Result->SetBoolField(TEXT("hasOpenEditors"), OpenEditors.Num() > 0);
+    
+    UE_LOG(LogUALEditor, Log, TEXT("editor.get_focus_context: %d open editors, focused: %s"),
+        OpenEditors.Num(),
+        FocusedEditor.IsValid() ? *FocusedEditor->GetStringField(TEXT("name")) : TEXT("none"));
+    
+    UAL_CommandUtils::SendResponse(RequestId, 200, Result);
+#else
+    UAL_CommandUtils::SendError(RequestId, 501, TEXT("editor.get_focus_context is only available in editor mode"));
+#endif
+}
+
 

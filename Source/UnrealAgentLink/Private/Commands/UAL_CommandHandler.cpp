@@ -8,6 +8,7 @@
 #include "UAL_BlueprintCommands.h"
 #include "UAL_ContentBrowserCommands.h"
 #include "UAL_MaterialCommands.h"
+#include "UAL_MessageLogCommands.h"
 
 #include "Async/Async.h"
 #include "Serialization/JsonReader.h"
@@ -111,6 +112,7 @@ void FUAL_CommandHandler::RegisterCommands()
 	FUAL_BlueprintCommands::RegisterCommands(CommandMap);
 	FUAL_ContentBrowserCommands::RegisterCommands(CommandMap);
 	FUAL_MaterialCommands::RegisterCommands(CommandMap);
+	FUAL_MessageLogCommands::RegisterCommands(CommandMap);
 }
 
 void FUAL_CommandHandler::Handle_Response(const FString& Method, const TSharedPtr<FJsonObject>& Payload)

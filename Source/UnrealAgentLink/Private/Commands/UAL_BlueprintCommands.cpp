@@ -1569,11 +1569,15 @@ void FUAL_BlueprintCommands::Handle_AddVariableToBlueprint(const TSharedPtr<FJso
  */
 void FUAL_BlueprintCommands::Handle_GetBlueprintGraph(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
 {
+	// 兼容 blueprint_path 和 blueprint_name
 	FString BlueprintPath;
 	if (!Payload->TryGetStringField(TEXT("blueprint_path"), BlueprintPath) || BlueprintPath.IsEmpty())
 	{
-		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required field: blueprint_path"));
-		return;
+		if (!Payload->TryGetStringField(TEXT("blueprint_name"), BlueprintPath) || BlueprintPath.IsEmpty())
+		{
+			UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required field: blueprint_path (or blueprint_name). Example: {\"blueprint_path\": \"/Game/Blueprints/BP_Hero\"}"));
+			return;
+		}
 	}
 
 	FString GraphName;
@@ -1809,6 +1813,10 @@ void FUAL_BlueprintCommands::Handle_AddNodeToBlueprint(const TSharedPtr<FJsonObj
 			Allowed.Add(MakeShared<FJsonValueString>(TEXT("DoOnce")));
 			Allowed.Add(MakeShared<FJsonValueString>(TEXT("DoN")));
 			Allowed.Add(MakeShared<FJsonValueString>(TEXT("FlipFlop")));
+			Allowed.Add(MakeShared<FJsonValueString>(TEXT("IsValid")));
+			Allowed.Add(MakeShared<FJsonValueString>(TEXT("ForEachLoop")));
+			Allowed.Add(MakeShared<FJsonValueString>(TEXT("ForEachLoopWithBreak")));
+			Allowed.Add(MakeShared<FJsonValueString>(TEXT("ReverseForEachLoop")));
 			Allowed.Add(MakeShared<FJsonValueString>(TEXT("CustomEvent")));
 			Allowed.Add(MakeShared<FJsonValueString>(TEXT("Select")));
 			Allowed.Add(MakeShared<FJsonValueString>(TEXT("MakeArray")));
@@ -2418,7 +2426,7 @@ void FUAL_BlueprintCommands::Handle_AddNodeToBlueprint(const TSharedPtr<FJsonObj
 		}
 		NewNodeBase = SpawnNode;
 	}
-	else if (NodeTypeLower == TEXT("macro") || NodeTypeLower == TEXT("forloop") || NodeTypeLower == TEXT("for_loop") || NodeTypeLower == TEXT("whileloop") || NodeTypeLower == TEXT("while_loop") || NodeTypeLower == TEXT("gate") || NodeTypeLower == TEXT("doonce") || NodeTypeLower == TEXT("do_once") || NodeTypeLower == TEXT("don") || NodeTypeLower == TEXT("do_n") || NodeTypeLower == TEXT("flipflop") || NodeTypeLower == TEXT("flip_flop"))
+	else if (NodeTypeLower == TEXT("macro") || NodeTypeLower == TEXT("forloop") || NodeTypeLower == TEXT("for_loop") || NodeTypeLower == TEXT("whileloop") || NodeTypeLower == TEXT("while_loop") || NodeTypeLower == TEXT("gate") || NodeTypeLower == TEXT("doonce") || NodeTypeLower == TEXT("do_once") || NodeTypeLower == TEXT("don") || NodeTypeLower == TEXT("do_n") || NodeTypeLower == TEXT("flipflop") || NodeTypeLower == TEXT("flip_flop") || NodeTypeLower == TEXT("isvalid") || NodeTypeLower == TEXT("is_valid") || NodeTypeLower == TEXT("foreachloop") || NodeTypeLower == TEXT("for_each_loop") || NodeTypeLower == TEXT("foreachloopwithbreak") || NodeTypeLower == TEXT("for_each_loop_with_break") || NodeTypeLower == TEXT("reverseforeachloop") || NodeTypeLower == TEXT("reverse_for_each_loop"))
 	{
 		// 处理标准宏 (StandardMacros)
 		// 如果 NodeTypeLower 本身就是宏名字 (如 for_loop)，直接用它查找
@@ -2432,6 +2440,10 @@ void FUAL_BlueprintCommands::Handle_AddNodeToBlueprint(const TSharedPtr<FJsonObj
 			else if (NodeTypeLower == TEXT("do_once") || NodeTypeLower == TEXT("doonce")) MacroName = TEXT("DoOnce");
 			else if (NodeTypeLower == TEXT("do_n") || NodeTypeLower == TEXT("don")) MacroName = TEXT("DoN");
 			else if (NodeTypeLower == TEXT("flip_flop") || NodeTypeLower == TEXT("flipflop")) MacroName = TEXT("FlipFlop");
+			else if (NodeTypeLower == TEXT("isvalid") || NodeTypeLower == TEXT("is_valid")) MacroName = TEXT("IsValid");
+			else if (NodeTypeLower == TEXT("foreachloop") || NodeTypeLower == TEXT("for_each_loop")) MacroName = TEXT("ForEachLoop");
+			else if (NodeTypeLower == TEXT("foreachloopwithbreak") || NodeTypeLower == TEXT("for_each_loop_with_break")) MacroName = TEXT("ForEachLoopWithBreak");
+			else if (NodeTypeLower == TEXT("reverseforeachloop") || NodeTypeLower == TEXT("reverse_for_each_loop")) MacroName = TEXT("ReverseForEachLoop");
 		}
 		
 		UBlueprint* MacroLib = nullptr;
@@ -3621,12 +3633,16 @@ TSharedPtr<FJsonObject> FUAL_BlueprintCommands::BuildBlueprintStructureJson(
  */
 void FUAL_BlueprintCommands::Handle_DescribeBlueprint(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
 {
-	// 1. 解析参数
+	// 1. 解析参数（兼容 blueprint_path 和 blueprint_name）
 	FString BlueprintPath;
 	if (!Payload->TryGetStringField(TEXT("blueprint_path"), BlueprintPath) || BlueprintPath.IsEmpty())
 	{
-		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required field: blueprint_path"));
-		return;
+		// 尝试 blueprint_name 作为备选
+		if (!Payload->TryGetStringField(TEXT("blueprint_name"), BlueprintPath) || BlueprintPath.IsEmpty())
+		{
+			UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required field: blueprint_path (or blueprint_name). Example: {\"blueprint_path\": \"/Game/Blueprints/BP_Hero\"}"));
+			return;
+		}
 	}
 
 	// 2. 加载蓝图

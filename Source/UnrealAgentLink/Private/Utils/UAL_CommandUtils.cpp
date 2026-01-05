@@ -1688,3 +1688,21 @@ void UAL_CommandUtils::SendError(const FString& RequestId, int32 Code, const FSt
 	}
 	SendResponse(RequestId, Code, ErrObj);
 }
+
+void UAL_CommandUtils::SendEvent(const FString& Method, const TSharedPtr<FJsonObject>& Payload)
+{
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("ver"), TEXT("1.0"));
+	Root->SetStringField(TEXT("type"), TEXT("evt"));
+	Root->SetStringField(TEXT("method"), Method);
+	if (Payload.IsValid())
+	{
+		Root->SetObjectField(TEXT("payload"), Payload);
+	}
+
+	FString OutputString;
+	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutputString);
+	FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
+	
+	FUAL_NetworkManager::Get().SendMessage(OutputString);
+}
