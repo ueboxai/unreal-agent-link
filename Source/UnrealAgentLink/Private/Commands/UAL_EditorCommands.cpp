@@ -160,7 +160,7 @@ static void CheckScreenshotFile(FString TaskId)
 	if (Context->RetryCount >= Context->MaxRetries)
 	{
 		UE_LOG(LogUALEditor, Error, TEXT("Screenshot timeout after %d retries"), Context->MaxRetries);
-		UAL_CommandUtils::SendError(Context->RequestId, 500, TEXT("HighResShot did not generate screenshot file after timeout"));
+		UAL_CommandUtils::SendError(Context->RequestId, 500, TEXT("截图超时：HighResShot 未生成截图文件。请确保已打开一个关卡/场景（Level）视口并置于前台，而非材质、蓝图等编辑器窗口。"));
 		
 		// 清理定时器和任务
 		if (GEditor)
