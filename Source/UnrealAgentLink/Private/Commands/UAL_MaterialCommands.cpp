@@ -853,6 +853,9 @@ void FUAL_MaterialCommands::Handle_AddMaterialNode(
 		}
 	}
 
+	// 记录贴图是否成功设置（用于返回给调用方）
+	bool bTextureApplied = false;
+
 	if (UMaterialExpressionTextureSample* TexSample = Cast<UMaterialExpressionTextureSample>(NewExpression))
 	{
 		if (!TexturePath.IsEmpty())
@@ -861,6 +864,12 @@ void FUAL_MaterialCommands::Handle_AddMaterialNode(
 			if (Texture)
 			{
 				TexSample->Texture = Texture;
+				bTextureApplied = true;
+				UE_LOG(LogUALMaterial, Log, TEXT("Set texture for TextureSample: %s"), *TexturePath);
+			}
+			else
+			{
+				UE_LOG(LogUALMaterial, Warning, TEXT("Failed to load texture: %s"), *TexturePath);
 			}
 		}
 	}
@@ -921,6 +930,13 @@ void FUAL_MaterialCommands::Handle_AddMaterialNode(
 	PinsJson.Add(MakeShared<FJsonValueObject>(OutputPin));
 	Data->SetArrayField(TEXT("pins"), PinsJson);
 
+	// 贴图设置状态
+	if (!TexturePath.IsEmpty())
+	{
+		Data->SetStringField(TEXT("texture_path"), TexturePath);
+		Data->SetBoolField(TEXT("texture_applied"), bTextureApplied);
+	}
+
 	UE_LOG(LogUALMaterial, Log, TEXT("Added node %s to material %s"), 
 		*NodeId, *Material->GetName());
 
@@ -961,7 +977,7 @@ void FUAL_MaterialCommands::Handle_ConnectMaterialPins(
 		return;
 	}
 
-	// 3. 查找源节点（通过 node_id 匹配）
+	// 3. 查找源节点（支持两种 ID 格式：计算的索引 ID 和 UE 对象实际名称）
 	UMaterialExpression* SourceExpression = nullptr;
 	int32 NodeIndex = 0;
 #if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
@@ -971,8 +987,14 @@ void FUAL_MaterialCommands::Handle_ConnectMaterialPins(
 #endif
 	{
 		if (!Expression) continue;
+		
+		// 方式1: 匹配计算生成的 ID (ClassName_Index)
 		FString NodeId = FString::Printf(TEXT("%s_%d"), *Expression->GetClass()->GetName(), NodeIndex++);
-		if (NodeId == SourceNode)
+		
+		// 方式2: 匹配 UE 对象的实际名称 (display_name)
+		FString DisplayName = Expression->GetName();
+		
+		if (NodeId == SourceNode || DisplayName == SourceNode)
 		{
 			SourceExpression = Expression;
 			break;
@@ -1191,19 +1213,64 @@ void FUAL_MaterialCommands::Handle_CompileMaterial(
 	// Post edit change 会触发编译
 	MaterialInterface->PostEditChange();
 
-	// 4. 构建响应
-	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
-	Data->SetBoolField(TEXT("compiled"), true);
-	Data->SetStringField(TEXT("material_path"), MaterialInterface->GetPathName());
-	Data->SetStringField(TEXT("material_name"), MaterialInterface->GetName());
-
-	// 简化版本：暂时不返回详细的编译错误
+	// 4. 获取编译错误和警告
 	TArray<TSharedPtr<FJsonValue>> ErrorsJson;
 	TArray<TSharedPtr<FJsonValue>> WarningsJson;
+	bool bHasErrors = false;
+
+	if (Material)
+	{
+		// 获取材质的编译输出日志
+		TArray<FString> CompileErrors;
+
+		// 检查材质的表达式是否有问题
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+		for (UMaterialExpression* Expression : Material->GetExpressions())
+#else
+		for (UMaterialExpression* Expression : Material->Expressions)
+#endif
+		{
+			if (!Expression) continue;
+
+			// 检查 TextureSample 节点是否缺少贴图
+			if (UMaterialExpressionTextureSample* TexSample = Cast<UMaterialExpressionTextureSample>(Expression))
+			{
+				if (TexSample->Texture == nullptr)
+				{
+					FString ErrorMsg = FString::Printf(TEXT("TextureSample node '%s' is missing input texture"), 
+						*Expression->GetName());
+					CompileErrors.Add(ErrorMsg);
+					bHasErrors = true;
+					UE_LOG(LogUALMaterial, Warning, TEXT("%s"), *ErrorMsg);
+				}
+			}
+		}
+
+		// 将错误添加到 JSON
+		for (const FString& Error : CompileErrors)
+		{
+			ErrorsJson.Add(MakeShared<FJsonValueString>(Error));
+		}
+	}
+
+	// 5. 构建响应
+	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+	Data->SetBoolField(TEXT("compiled"), true);
+	Data->SetBoolField(TEXT("has_errors"), bHasErrors);
+	Data->SetStringField(TEXT("material_path"), MaterialInterface->GetPathName());
+	Data->SetStringField(TEXT("material_name"), MaterialInterface->GetName());
 	Data->SetArrayField(TEXT("errors"), ErrorsJson);
 	Data->SetArrayField(TEXT("warnings"), WarningsJson);
 
-	UE_LOG(LogUALMaterial, Log, TEXT("Compiled material: %s"), *MaterialInterface->GetName());
+	if (bHasErrors)
+	{
+		UE_LOG(LogUALMaterial, Warning, TEXT("Material compiled with %d errors: %s"), 
+			ErrorsJson.Num(), *MaterialInterface->GetName());
+	}
+	else
+	{
+		UE_LOG(LogUALMaterial, Log, TEXT("Compiled material successfully: %s"), *MaterialInterface->GetName());
+	}
 
 	UAL_CommandUtils::SendResponse(RequestId, 200, Data);
 }
@@ -1238,7 +1305,7 @@ void FUAL_MaterialCommands::Handle_SetMaterialNodeValue(
 		return;
 	}
 
-	// 3. 查找目标节点
+	// 3. 查找目标节点（支持两种 ID 格式：计算的索引 ID 和 UE 对象实际名称）
 	UMaterialExpression* TargetExpression = nullptr;
 	int32 NodeIndex = 0;
 #if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
@@ -1248,8 +1315,14 @@ void FUAL_MaterialCommands::Handle_SetMaterialNodeValue(
 #endif
 	{
 		if (!Expression) continue;
+		
+		// 方式1: 匹配计算生成的 ID (ClassName_Index)
 		FString CurrentNodeId = FString::Printf(TEXT("%s_%d"), *Expression->GetClass()->GetName(), NodeIndex++);
-		if (CurrentNodeId == NodeId)
+		
+		// 方式2: 匹配 UE 对象的实际名称 (display_name)
+		FString DisplayName = Expression->GetName();
+		
+		if (CurrentNodeId == NodeId || DisplayName == NodeId)
 		{
 			TargetExpression = Expression;
 			break;
@@ -1297,6 +1370,56 @@ void FUAL_MaterialCommands::Handle_SetMaterialNodeValue(
 			ScalarParam->DefaultValue = (float)ScalarValue;
 			Data->SetNumberField(TEXT("new_value"), ScalarValue);
 			bModified = true;
+		}
+	}
+
+	// 尝试设置贴图路径 (TextureSample 节点)
+	FString TexturePath;
+	if (!bModified && Payload->TryGetStringField(TEXT("value"), TexturePath) && !TexturePath.IsEmpty())
+	{
+		if (UMaterialExpressionTextureSample* TextureSampleExpr = Cast<UMaterialExpressionTextureSample>(TargetExpression))
+		{
+			// 记录旧值
+			FString OldTexturePath = TextureSampleExpr->Texture ? TextureSampleExpr->Texture->GetPathName() : TEXT("");
+			Data->SetStringField(TEXT("old_value"), OldTexturePath);
+
+			// 加载新贴图
+			UTexture* NewTexture = LoadObject<UTexture>(nullptr, *TexturePath);
+			if (NewTexture)
+			{
+				TextureSampleExpr->Texture = NewTexture;
+				Data->SetStringField(TEXT("new_value"), TexturePath);
+				bModified = true;
+				UE_LOG(LogUALMaterial, Log, TEXT("Set texture for node %s: %s -> %s"), 
+					*NodeId, *OldTexturePath, *TexturePath);
+			}
+			else
+			{
+				UE_LOG(LogUALMaterial, Warning, TEXT("Failed to load texture: %s"), *TexturePath);
+				Data->SetStringField(TEXT("error"), FString::Printf(TEXT("Texture not found: %s"), *TexturePath));
+			}
+		}
+		else if (UMaterialExpressionTextureSampleParameter2D* TextureParamExpr = Cast<UMaterialExpressionTextureSampleParameter2D>(TargetExpression))
+		{
+			// 记录旧值
+			FString OldTexturePath = TextureParamExpr->Texture ? TextureParamExpr->Texture->GetPathName() : TEXT("");
+			Data->SetStringField(TEXT("old_value"), OldTexturePath);
+
+			// 加载新贴图
+			UTexture* NewTexture = LoadObject<UTexture>(nullptr, *TexturePath);
+			if (NewTexture)
+			{
+				TextureParamExpr->Texture = NewTexture;
+				Data->SetStringField(TEXT("new_value"), TexturePath);
+				bModified = true;
+				UE_LOG(LogUALMaterial, Log, TEXT("Set texture parameter for node %s: %s -> %s"), 
+					*NodeId, *OldTexturePath, *TexturePath);
+			}
+			else
+			{
+				UE_LOG(LogUALMaterial, Warning, TEXT("Failed to load texture: %s"), *TexturePath);
+				Data->SetStringField(TEXT("error"), FString::Printf(TEXT("Texture not found: %s"), *TexturePath));
+			}
 		}
 	}
 
@@ -1370,7 +1493,7 @@ void FUAL_MaterialCommands::Handle_DeleteMaterialNode(
 		return;
 	}
 
-	// 3. 查找目标节点
+	// 3. 查找目标节点（支持两种 ID 格式：计算的索引 ID 和 UE 对象实际名称）
 	UMaterialExpression* TargetExpression = nullptr;
 	int32 NodeIndex = 0;
 #if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
@@ -1380,8 +1503,14 @@ void FUAL_MaterialCommands::Handle_DeleteMaterialNode(
 #endif
 	{
 		if (!Expression) continue;
+		
+		// 方式1: 匹配计算生成的 ID (ClassName_Index)
 		FString CurrentNodeId = FString::Printf(TEXT("%s_%d"), *Expression->GetClass()->GetName(), NodeIndex++);
-		if (CurrentNodeId == NodeId)
+		
+		// 方式2: 匹配 UE 对象的实际名称 (display_name)
+		FString DisplayName = Expression->GetName();
+		
+		if (CurrentNodeId == NodeId || DisplayName == NodeId)
 		{
 			TargetExpression = Expression;
 			break;
