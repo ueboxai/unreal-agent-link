@@ -16,7 +16,7 @@ extern ENGINE_API float GAverageMS;
 // UE 5.1+ 正式支持扩展统计变量（ENGINE_API导出）
 // UE 5.0 中这些变量可能存在于引擎内部但未导出，无法直接访问
 #if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
-#define UAL_WITH_EXTENDED_AVG_STATS 1
+#define UAL_WITH_EXTENDED_AVG_STATS 0
 extern ENGINE_API float GAverageGameTime;
 extern ENGINE_API float GAverageDrawTime;
 extern ENGINE_API float GAverageRHITTime;

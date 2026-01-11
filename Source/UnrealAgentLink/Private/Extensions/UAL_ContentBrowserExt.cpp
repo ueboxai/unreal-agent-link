@@ -14,7 +14,7 @@
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/EngineVersion.h"
 #include "Misc/Base64.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Engine/World.h"
 #include "Internationalization/Internationalization.h"
@@ -126,7 +126,7 @@ namespace
 		TArray64<uint8> PngData;
 
 		// 获取原始数据（无论源格式如何，都尝试转为 BGRA）
-		TArray<uint8> RawData;
+		TArray64<uint8> RawData;
 		int32 Width = ImageWidth;
 		int32 Height = ImageHeight;
 		
@@ -155,7 +155,8 @@ namespace
 			// 假设为未压缩的 BGRA
 			if (SourceData.Num() == ImageWidth * ImageHeight * 4)
 			{
-				RawData = SourceData;
+				RawData.SetNumUninitialized(SourceData.Num());
+				FMemory::Memcpy(RawData.GetData(), SourceData.GetData(), SourceData.Num());
 				bGotRawData = true;
 			}
 		}
@@ -192,7 +193,7 @@ namespace
 			FString FilePath = TempDir / FString::Printf(TEXT("%s_%lld.png"), *SafeName, FDateTime::Now().GetTicks());
 			
 			// 写入文件
-			if (FFileHelper::SaveArrayToFile(TArray<uint8>(PngData), *FilePath))
+			if (FFileHelper::SaveArrayToFile(PngData, *FilePath))
 			{
 				UE_LOG(LogUALContentBrowser, Log, TEXT("✅ 缩略图已保存: %s"), *FilePath);
 				return FilePath;
@@ -558,8 +559,8 @@ void FUAL_ContentBrowserExt::AddProjectMeta(TSharedPtr<FJsonObject>& Payload) co
 	const FString ProjectName = FApp::GetProjectName();
 	FString ProjectVersion(TEXT("unspecified"));
 	bool bHasProjectVersion = false;
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
-	// UE5.1+ 提供版本号获取
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
+	// UE5.4+ 提供版本号获取
 	const FString RetrievedVersion = FApp::GetProjectVersion();
 	if (!RetrievedVersion.IsEmpty())
 	{
@@ -567,7 +568,7 @@ void FUAL_ContentBrowserExt::AddProjectMeta(TSharedPtr<FJsonObject>& Payload) co
 		bHasProjectVersion = true;
 	}
 #else
-	// UE5.0 无 GetProjectVersion，保持默认值
+	// UE5.0~5.3 无 GetProjectVersion，保持默认值
 #endif
 	if (!bHasProjectVersion && GConfig)
 	{

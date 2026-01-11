@@ -39,8 +39,9 @@
 #include "Engine/TimelineTemplate.h"
 #include "Logging/TokenizedMessage.h"
 #if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
-#include "Logging/UObjectToken.h"
+#include "Misc/UObjectToken.h"
 #endif
+// Misc/Variant.h - removed due to compatibility issues
 
 DEFINE_LOG_CATEGORY_STATIC(LogUALBlueprint, Log, All);
 
@@ -150,10 +151,7 @@ static UEdGraph* UAL_FindGraph(UBlueprint* Blueprint, const FString& GraphName)
 	}
 
 	TArray<UEdGraph*> AllGraphs;
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
-	FBlueprintEditorUtils::GetAllGraphs(Blueprint, AllGraphs);
-#else
-	// UE5.0: 手动收集所有图表
+	// 手动收集所有图表 (所有 UE5 版本通用，GetAllGraphs 不存在)
 	AllGraphs.Append(Blueprint->UbergraphPages);
 	AllGraphs.Append(Blueprint->FunctionGraphs);
 	AllGraphs.Append(Blueprint->DelegateSignatureGraphs);
@@ -162,7 +160,6 @@ static UEdGraph* UAL_FindGraph(UBlueprint* Blueprint, const FString& GraphName)
 	{
 		AllGraphs.Append(Blueprint->IntermediateGeneratedGraphs);
 	}
-#endif
 	for (UEdGraph* G : AllGraphs)
 	{
 		if (G && G->GetName().Equals(GraphName, ESearchCase::IgnoreCase))
@@ -1515,19 +1512,12 @@ void FUAL_BlueprintCommands::Handle_AddVariableToBlueprint(const TSharedPtr<FJso
 
 	FBlueprintEditorUtils::AddMemberVariable(Blueprint, VarName, PinType);
 
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
-	if (!DefaultValueStr.IsEmpty())
-	{
-		FBlueprintEditorUtils::SetBlueprintVariableDefaultValue(Blueprint, VarName, DefaultValueStr);
-	}
-#else
-	// UE5.0: SetBlueprintVariableDefaultValue 不存在，需要通过其他方式设置默认值
+	// 所有 UE5 版本：SetBlueprintVariableDefaultValue 不存在
 	// TODO: 可以尝试直接设置 CDO 的属性
 	if (!DefaultValueStr.IsEmpty())
 	{
-		UE_LOG(LogUALBlueprint, Warning, TEXT("Setting default value is not fully supported in UE5.0"));
+		UE_LOG(LogUALBlueprint, Warning, TEXT("Setting default value is not fully supported in this UE version"));
 	}
-#endif
 
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 
@@ -2592,7 +2582,8 @@ void FUAL_BlueprintCommands::Handle_AddNodeToBlueprint(const TSharedPtr<FJsonObj
 		FGraphNodeCreator<UK2Node_BreakStruct> NodeCreator(*Graph);
 		UK2Node_BreakStruct* StructNode = NodeCreator.CreateNode();
 		StructNode->StructType = Struct;
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
+		// UE5.4+ 才有此成员
 		StructNode->bMadeAfterOverridePinInMake = true;
 #endif
 		StructNode->NodePosX = PosX;
@@ -3092,12 +3083,8 @@ void FUAL_BlueprintCommands::Handle_CreateFunctionGraph(const TSharedPtr<FJsonOb
 
 	// 添加到蓝图 FunctionGraphs
 	// 添加到蓝图 FunctionGraphs
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
-	FBlueprintEditorUtils::AddFunctionGraph(Blueprint, NewGraph, /*bIsUserCreated*/ true, nullptr);
-#else
-	// UE5.0 needs explicit template arg for nullptr deduction
+	// UE5.0~5.3 的 AddFunctionGraph 需要显式模板参数
 	FBlueprintEditorUtils::AddFunctionGraph<UClass>(Blueprint, NewGraph, /*bIsUserCreated*/ true, nullptr);
-#endif
 
 	// 2) 获取/创建入口与返回节点
 	UK2Node_FunctionEntry* EntryNode = nullptr;
@@ -4363,4 +4350,3 @@ void FUAL_BlueprintCommands::Handle_CreateGraphDeclarative(const TSharedPtr<FJso
 	
 	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
 }
-

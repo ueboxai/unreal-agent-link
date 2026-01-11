@@ -846,18 +846,22 @@ TSharedPtr<FJsonObject> UAL_CommandUtils::MakeRotatorJson(const FRotator& Rot)
 	return Obj;
 }
 
+/**
+ * 将 FProperty 的值转换为 JSON 格式（跨版本兼容）
+ * 
+ * UE 版本差异:
+ * - UE5.0~5.3: 使用 FJsonObjectConverter::UPropertyToJsonValue()
+ * - UE5.4+: 可使用新的 PropertyToJsonValue (带 out 参数) API
+ * 
+ * @param Prop 属性指针
+ * @param ValuePtr 属性值指针
+ * @return JSON 值，失败返回 nullptr
+ */
 TSharedPtr<FJsonValue> UAL_CommandUtils::PropertyToJsonValueCompat(FProperty* Prop, const void* ValuePtr)
 {
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3)
-	TSharedPtr<FJsonValue> JsonValue;
-	if (FJsonObjectConverter::PropertyToJsonValue(Prop, ValuePtr, 0, 0, JsonValue) && JsonValue.IsValid())
-	{
-		return JsonValue;
-	}
-	return nullptr;
-#else
+	// UE5.0~5.3 统一使用 UPropertyToJsonValue (返回值版本)
+	// 注意：UE5.3 中不存在 FJsonObjectConverter::PropertyToJsonValue（带 out 参数的版本）
 	return FJsonObjectConverter::UPropertyToJsonValue(Prop, ValuePtr, 0, 0, nullptr, nullptr);
-#endif
 }
 
 TSharedPtr<FJsonObject> UAL_CommandUtils::BuildActorInfo(AActor* Actor)

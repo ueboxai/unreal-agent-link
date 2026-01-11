@@ -27,6 +27,7 @@
 #include "Async/Async.h"
 #include "FileMediaSource.h"
 #include "Misc/FileHelper.h"
+#include "Misc/App.h" // UAL: 包含 GIsRunningUnattendedScript 用于无人值守模式删除
 
 // 使用独立的 Log Category 名称，避免与 UAL_ContentBrowserExt 冲突
 // 放在这里以便静态函数可以使用
@@ -612,8 +613,8 @@ void FUAL_ContentBrowserCommands::Handle_ImportAssets(
 						IAssetTools& AssetToolsRef = AssetToolsMod.Get();
 						
 						TArray<FAssetRenameData> RenameData;
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
-						// UE 5.1+ 使用 SoftObjectPath
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
+						// UE 5.4+ 使用 SoftObjectPath
 						FAssetRegistryModule& AssetRegistryMod = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
 						IAssetRegistry& AssetReg = AssetRegistryMod.Get();
 						FAssetData AssetData = AssetReg.GetAssetByObjectPath(FSoftObjectPath(ObjectPath));
@@ -622,7 +623,7 @@ void FUAL_ContentBrowserCommands::Handle_ImportAssets(
 							RenameData.Add(FAssetRenameData(AssetData.ToSoftObjectPath(), PackagePath, *NormalizedName));
 						}
 #else
-						// UE 5.0 使用 UObject*
+						// UE 5.0~5.3 使用 UObject*
 						RenameData.Add(FAssetRenameData(ImportedAsset, PackagePath, *NormalizedName));
 #endif
 						
@@ -926,16 +927,15 @@ void FUAL_ContentBrowserCommands::Handle_MoveAsset(
 	// 确保资产在内存中被正确标记
 	SourceObject->MarkPackageDirty();
 	
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
-	// UE 5.1+ 使用 SoftObjectPath 构造
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
+	// UE 5.4+ 使用 SoftObjectPath 构造
 	RenameData.Add(FAssetRenameData(SourceAsset.ToSoftObjectPath(), DestPackagePath, FinalDestAssetName));
-	UE_LOG(LogUALContentCmd, Log, TEXT("Using UE 5.1+ FAssetRenameData constructor with SoftObjectPath"));
+	UE_LOG(LogUALContentCmd, Log, TEXT("Using UE 5.4+ FAssetRenameData constructor with SoftObjectPath"));
 #else
-	// UE 5.0: 使用 TWeakObjectPtr 正确初始化
-	// 关键：使用 FAssetRenameData(UObject*, FString, FString) 构造函数
+	// UE 5.0~5.3: 使用 UObject* 构造函数
 	FAssetRenameData RenameItem(SourceObject, DestPackagePath, FinalDestAssetName);
 	RenameData.Add(RenameItem);
-	UE_LOG(LogUALContentCmd, Log, TEXT("Using UE 5.0 FAssetRenameData with direct constructor: Object=%s, NewPath=%s, NewName=%s"), 
+	UE_LOG(LogUALContentCmd, Log, TEXT("Using UE 5.0~5.3 FAssetRenameData with UObject* constructor: Object=%s, NewPath=%s, NewName=%s"), 
 		*SourceObject->GetPathName(), *DestPackagePath, *FinalDestAssetName);
 #endif
 	
@@ -1025,11 +1025,15 @@ void FUAL_ContentBrowserCommands::Handle_MoveAsset(
 
 /**
  * content.delete - 删除资产
- * 彻底删除资产或文件夹
+ * 彻底删除资产或文件夹（无对话框，使用 ForceDeleteObjects）
  */
 void FUAL_ContentBrowserCommands::Handle_DeleteAssets(
 	const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
 {
+	// 🔑 关键：进入无人值守模式，跳过所有交互式对话框
+	// 这与 UE5.3 的 UEditorAssetSubsystem::DeleteAsset 使用相同的策略
+	TGuardValue<bool> UnattendedScriptGuard(GIsRunningUnattendedScript, true);
+	
 	// 解析 paths 数组
 	const TArray<TSharedPtr<FJsonValue>>* PathsArray = nullptr;
 	if (!Payload->TryGetArrayField(TEXT("paths"), PathsArray) || !PathsArray || PathsArray->Num() == 0)
@@ -1038,7 +1042,7 @@ void FUAL_ContentBrowserCommands::Handle_DeleteAssets(
 		return;
 	}
 	
-	UE_LOG(LogUALContentCmd, Log, TEXT("content.delete: %d paths"), PathsArray->Num());
+	UE_LOG(LogUALContentCmd, Log, TEXT("content.delete: %d paths (Unattended mode enabled)"), PathsArray->Num());
 	
 	// 获取 Asset Registry
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
@@ -1111,11 +1115,13 @@ void FUAL_ContentBrowserCommands::Handle_DeleteAssets(
 		}
 	}
 	
-	// 执行删除
+	// 使用 ForceDeleteObjects 执行删除（配合 UnattendedScriptGuard 完全无对话框）
 	int32 DeletedCount = 0;
 	if (ObjectsToDelete.Num() > 0)
 	{
-		DeletedCount = ObjectTools::DeleteObjects(ObjectsToDelete, true);
+		const bool bShowConfirmation = false; // 不显示确认对话框
+		DeletedCount = ObjectTools::ForceDeleteObjects(ObjectsToDelete, bShowConfirmation);
+		UE_LOG(LogUALContentCmd, Log, TEXT("ForceDeleteObjects returned: %d deleted"), DeletedCount);
 	}
 	
 	// 返回结果

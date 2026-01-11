@@ -135,7 +135,7 @@ namespace UALViewportUtils
 		const int32 ImageHeight = ThumbnailToUse->GetImageHeight();
 		
 		TArray64<uint8> PngData;
-		TArray<uint8> RawData;
+		TArray64<uint8> RawData;
 		int32 Width = ImageWidth;
 		int32 Height = ImageHeight;
 		
@@ -162,7 +162,8 @@ namespace UALViewportUtils
 		{
 			if (SourceData.Num() == ImageWidth * ImageHeight * 4)
 			{
-				RawData = SourceData;
+				RawData.SetNumUninitialized(SourceData.Num());
+				FMemory::Memcpy(RawData.GetData(), SourceData.GetData(), SourceData.Num());
 				bGotRawData = true;
 			}
 		}
@@ -191,7 +192,7 @@ namespace UALViewportUtils
 			SafeName = SafeName.Replace(TEXT(" "), TEXT("_"));
 			FString FilePath = TempDir / FString::Printf(TEXT("%s_%lld.png"), *SafeName, FDateTime::Now().GetTicks());
 			
-			if (FFileHelper::SaveArrayToFile(TArray<uint8>(PngData), *FilePath))
+			if (FFileHelper::SaveArrayToFile(PngData, *FilePath))
 			{
 				UE_LOG(LogUALViewport, Log, TEXT("缩略图已保存: %s"), *FilePath);
 				return FilePath;
@@ -463,7 +464,8 @@ void FUAL_LevelViewportExt::AddProjectMeta(TSharedPtr<FJsonObject>& Payload) con
 	const FString ProjectName = FApp::GetProjectName();
 	FString ProjectVersion(TEXT("unspecified"));
 
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
+	// UE5.4+ 提供 GetProjectVersion
 	const FString RetrievedVersion = FApp::GetProjectVersion();
 	if (!RetrievedVersion.IsEmpty())
 	{

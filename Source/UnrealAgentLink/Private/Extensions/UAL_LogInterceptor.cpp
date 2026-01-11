@@ -10,15 +10,30 @@
 #include "Serialization/JsonSerializer.h"
 #include "HAL/IConsoleManager.h"
 
-// 兼容 5.0 与 5.1+ 的日志等级字符串获取
+/**
+ * 将日志级别转换为字符串（跨版本兼容）
+ * 
+ * 版本差异:
+ * - UE5.4+: FLogVerbosity::ToString()
+ * - UE5.0~5.3: FOutputDeviceHelper::VerbosityToString() (已弃用但仍可用)
+ */
 static FString UALVerbosityToString(ELogVerbosity::Type Verbosity)
 {
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
 	return FLogVerbosity::ToString(Verbosity);
 #else
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	return FOutputDeviceHelper::VerbosityToString(Verbosity);
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	// UE5.0~5.3: VerbosityToString 已移除，手动映射
+	switch (Verbosity)
+	{
+	case ELogVerbosity::Fatal:       return TEXT("Fatal");
+	case ELogVerbosity::Error:       return TEXT("Error");
+	case ELogVerbosity::Warning:     return TEXT("Warning");
+	case ELogVerbosity::Display:     return TEXT("Display");
+	case ELogVerbosity::Log:         return TEXT("Log");
+	case ELogVerbosity::Verbose:     return TEXT("Verbose");
+	case ELogVerbosity::VeryVerbose: return TEXT("VeryVerbose");
+	default:                         return TEXT("Unknown");
+	}
 #endif
 }
 

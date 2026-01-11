@@ -973,26 +973,9 @@ bool FUALNormalizedImporter::SetupAssetRegistryAndResolver(FUALNormalizedImportS
         // 创建一个引用 Session 的闭包
         TMap<FName, FName>* RedirectMapPtr = &Session.RedirectMap;
 
-        // FResolvePackageNameDelegate 的签名是 bool(const FString&, FString&)
-        // 第一个参数是请求的包名，第二个参数是输出的解析后包名
-        // 返回 true 表示成功解析，false 表示未解析
-        FCoreDelegates::FResolvePackageNameDelegate ResolverDelegate = 
-            FCoreDelegates::FResolvePackageNameDelegate::CreateLambda(
-                [RedirectMapPtr](const FString& RequestedPackageName, FString& OutResolvedName) -> bool
-                {
-                    FName RequestedName(*RequestedPackageName);
-                    if (const FName* NewName = RedirectMapPtr->Find(RequestedName))
-                    {
-                        UE_LOG(LogNormalizedImport, Verbose, TEXT("PackageNameResolver: %s -> %s"),
-                            *RequestedPackageName, *NewName->ToString());
-                        OutResolvedName = NewName->ToString();
-                        return true;
-                    }
-                    return false; // 未解析
-                }
-            );
-
-        FCoreDelegates::PackageNameResolvers.Add(ResolverDelegate);
+		// 注意：UE5.3 中 PackageNameResolvers 是简单的 delegate 数组
+		// 直接使用 CoreRedirects 替代 PackageNameResolvers
+		// PackageNameResolvers 在 UE5.3 中签名不一致，使用 CoreRedirects 更可靠
         
         // 同时也注册 CoreRedirects，这对于 LinkerLoad 更有效
         TArray<FCoreRedirect> PackageRedirects;
@@ -1002,7 +985,7 @@ bool FUALNormalizedImporter::SetupAssetRegistryAndResolver(FUALNormalizedImportS
         }
         FCoreRedirects::AddRedirectList(PackageRedirects, TEXT("UAL_NormalizedImporter"));
         
-        Session.ResolverIndex = FCoreDelegates::PackageNameResolvers.Num() - 1; // 仅作为参考，实际可能不准确
+        Session.ResolverIndex = INDEX_NONE; // PackageNameResolvers 不再使用，索引设为无效
     }
 
     return true;
@@ -1080,10 +1063,12 @@ bool FUALNormalizedImporter::LoadAndFixReferences(FUALNormalizedImportSession& S
                     UE_LOG(LogNormalizedImport, Log, TEXT("准备移动资产: %s -> %s/%s"), 
                         *MainAsset->GetPathName(), *NewPath, *NewAssetName);
                     
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
-                    RenameData.Add(FAssetRenameData(MainAsset->GetPathName(), NewPath, NewAssetName));
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
+						// UE5.4+ 使用路径字符串构造
+						RenameData.Add(FAssetRenameData(MainAsset->GetPathName(), NewPath, NewAssetName));
 #else
-                    RenameData.Add(FAssetRenameData(MainAsset, NewPath, NewAssetName));
+						// UE5.0~5.3 使用 UObject* 构造
+						RenameData.Add(FAssetRenameData(MainAsset, NewPath, NewAssetName));
 #endif
                     Session.PackagesToSave.Add(Package);
                 }
