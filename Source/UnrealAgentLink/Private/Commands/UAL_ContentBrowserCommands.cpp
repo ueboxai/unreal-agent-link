@@ -1096,14 +1096,19 @@ void FUAL_ContentBrowserCommands::Handle_DeleteAssets(
 		
 		if (AssetData.IsValid())
 		{
+			UE_LOG(LogUALContentCmd, Log, TEXT("Found valid AssetData for: %s, PackageName: %s"), 
+				*AssetPath, *AssetData.PackageName.ToString());
+			
 			UObject* Asset = AssetData.GetAsset();
 			if (Asset)
 			{
+				UE_LOG(LogUALContentCmd, Log, TEXT("Successfully loaded asset: %s"), *Asset->GetPathName());
 				ObjectsToDelete.Add(Asset);
 				DeletedPaths.Add(AssetPath);
 			}
 			else
 			{
+				UE_LOG(LogUALContentCmd, Warning, TEXT("Failed to load asset object for: %s"), *AssetPath);
 				FailedPaths.Add(AssetPath);
 			}
 		}
@@ -1115,13 +1120,21 @@ void FUAL_ContentBrowserCommands::Handle_DeleteAssets(
 		}
 	}
 	
+	UE_LOG(LogUALContentCmd, Log, TEXT("Collected %d objects to delete, %d failed paths"), 
+		ObjectsToDelete.Num(), FailedPaths.Num());
+	
 	// 使用 ForceDeleteObjects 执行删除（配合 UnattendedScriptGuard 完全无对话框）
 	int32 DeletedCount = 0;
 	if (ObjectsToDelete.Num() > 0)
 	{
+		UE_LOG(LogUALContentCmd, Log, TEXT("Calling ForceDeleteObjects with %d objects..."), ObjectsToDelete.Num());
 		const bool bShowConfirmation = false; // 不显示确认对话框
 		DeletedCount = ObjectTools::ForceDeleteObjects(ObjectsToDelete, bShowConfirmation);
 		UE_LOG(LogUALContentCmd, Log, TEXT("ForceDeleteObjects returned: %d deleted"), DeletedCount);
+	}
+	else
+	{
+		UE_LOG(LogUALContentCmd, Warning, TEXT("No valid objects collected for deletion"));
 	}
 	
 	// 返回结果
