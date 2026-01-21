@@ -201,8 +201,12 @@ static bool ImportVideoFile(
 	FSavePackageArgs SaveArgs;
 	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
 	
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
 	const FSavePackageResultStruct SaveResult = UPackage::Save(Package, MediaSource, *PackageFileName, SaveArgs);
 	if (SaveResult.Result != ESavePackageResult::Success)
+#else
+	if (!UPackage::SavePackage(Package, MediaSource, *PackageFileName, SaveArgs))
+#endif
 	{
 		UE_LOG(LogUALContentCmd, Warning, TEXT("Failed to save FileMediaSource: %s"), *PackageFileName);
 		// 即使保存失败，资产仍然存在于内存中，用户可以稍后手动保存
@@ -613,19 +617,8 @@ void FUAL_ContentBrowserCommands::Handle_ImportAssets(
 						IAssetTools& AssetToolsRef = AssetToolsMod.Get();
 						
 						TArray<FAssetRenameData> RenameData;
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
-						// UE 5.4+ 使用 SoftObjectPath
-						FAssetRegistryModule& AssetRegistryMod = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-						IAssetRegistry& AssetReg = AssetRegistryMod.Get();
-						FAssetData AssetData = AssetReg.GetAssetByObjectPath(FSoftObjectPath(ObjectPath));
-						if (AssetData.IsValid())
-						{
-							RenameData.Add(FAssetRenameData(AssetData.ToSoftObjectPath(), PackagePath, *NormalizedName));
-						}
-#else
-						// UE 5.0~5.3 使用 UObject*
+// 使用 TWeakObjectPtr<UObject> 构造函数，兼容所有 UE5 版本
 						RenameData.Add(FAssetRenameData(ImportedAsset, PackagePath, *NormalizedName));
-#endif
 						
 						if (RenameData.Num() > 0)
 						{
@@ -927,17 +920,11 @@ void FUAL_ContentBrowserCommands::Handle_MoveAsset(
 	// 确保资产在内存中被正确标记
 	SourceObject->MarkPackageDirty();
 	
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
-	// UE 5.4+ 使用 SoftObjectPath 构造
-	RenameData.Add(FAssetRenameData(SourceAsset.ToSoftObjectPath(), DestPackagePath, FinalDestAssetName));
-	UE_LOG(LogUALContentCmd, Log, TEXT("Using UE 5.4+ FAssetRenameData constructor with SoftObjectPath"));
-#else
-	// UE 5.0~5.3: 使用 UObject* 构造函数
+// 使用 TWeakObjectPtr<UObject> 构造函数，兼容所有 UE5 版本
 	FAssetRenameData RenameItem(SourceObject, DestPackagePath, FinalDestAssetName);
 	RenameData.Add(RenameItem);
-	UE_LOG(LogUALContentCmd, Log, TEXT("Using UE 5.0~5.3 FAssetRenameData with UObject* constructor: Object=%s, NewPath=%s, NewName=%s"), 
+	UE_LOG(LogUALContentCmd, Log, TEXT("FAssetRenameData: Object=%s, NewPath=%s, NewName=%s"), 
 		*SourceObject->GetPathName(), *DestPackagePath, *FinalDestAssetName);
-#endif
 	
 	// 执行移动/重命名
 	bool bSuccess = AssetTools.RenameAssets(RenameData);
@@ -977,8 +964,12 @@ void FUAL_ContentBrowserCommands::Handle_MoveAsset(
 				SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
 				
 				// 使用新的 SavePackageArgs API（UE 5.0+ 统一使用）
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
 				FSavePackageResultStruct Result = UPackage::Save(Package, MovedAsset, *PackageFileName, SaveArgs);
 				bSaved = Result.Result == ESavePackageResult::Success;
+#else
+				bSaved = UPackage::SavePackage(Package, MovedAsset, *PackageFileName, SaveArgs);
+#endif
 				UE_LOG(LogUALContentCmd, Log, TEXT("Saved moved asset: %s (Success: %s)"), *PackageFileName, bSaved ? TEXT("true") : TEXT("false"));
 			}
 		}

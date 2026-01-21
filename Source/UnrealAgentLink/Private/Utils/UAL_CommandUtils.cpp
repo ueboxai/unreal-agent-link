@@ -21,6 +21,10 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "HAL/IConsoleManager.h"
 
+#if WITH_EDITOR
+#include "Selection.h"
+#endif
+
 DEFINE_LOG_CATEGORY_STATIC(LogUALUtils, Log, All);
 
 // 批量创建上限：默认 50，可在控制台/命令行设置：ual.MaxBatchCreate 50
@@ -348,12 +352,21 @@ UClass* UAL_CommandUtils::ResolveClassFromIdentifier(const FString& Identifier, 
 	}
 	else
 	{
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+		ResolvedClass = FindFirstObject<UClass>(*Identifier, EFindFirstObjectOptions::NativeFirst);
+		if (!ResolvedClass)
+		{
+			const FString WithUPrefix = FString::Printf(TEXT("U%s"), *Identifier);
+			ResolvedClass = FindFirstObject<UClass>(*WithUPrefix, EFindFirstObjectOptions::NativeFirst);
+		}
+#else
 		ResolvedClass = FindObject<UClass>(ANY_PACKAGE, *Identifier);
 		if (!ResolvedClass)
 		{
 			const FString WithUPrefix = FString::Printf(TEXT("U%s"), *Identifier);
 			ResolvedClass = FindObject<UClass>(ANY_PACKAGE, *WithUPrefix);
 		}
+#endif
 	}
 
 	if (!ResolvedClass)
@@ -383,6 +396,25 @@ bool UAL_CommandUtils::ResolveTargetsToActors(const TSharedPtr<FJsonObject>& Tar
 	}
 
 	bool bHasExplicitTargets = false;
+
+	// selection: 当前编辑器选中的Actor
+#if WITH_EDITOR
+	bool bUseSelection = false;
+	if (Targets->TryGetBoolField(TEXT("selection"), bUseSelection) && bUseSelection)
+	{
+		bHasExplicitTargets = true;
+		if (GEditor)
+		{
+			for (FSelectionIterator It(GEditor->GetSelectedActorIterator()); It; ++It)
+			{
+				if (AActor* Selected = Cast<AActor>(*It))
+				{
+					OutSet.Add(Selected);
+				}
+			}
+		}
+	}
+#endif
 
 	// names
 	const TArray<TSharedPtr<FJsonValue>>* NamesArr = nullptr;
@@ -1561,7 +1593,11 @@ bool UAL_CommandUtils::SetSimpleProperty(FProperty* Prop, UObject* Obj, const TS
 		}
 
 		// 尝试查找类
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+		UClass* FoundClass = FindFirstObject<UClass>(*ClassName, EFindFirstObjectOptions::NativeFirst);
+#else
 		UClass* FoundClass = FindObject<UClass>(ANY_PACKAGE, *ClassName);
+#endif
 		if (!FoundClass)
 		{
 			FoundClass = LoadObject<UClass>(nullptr, *ClassName);

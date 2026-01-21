@@ -165,7 +165,7 @@ void FUAL_CommandHandler::Handle_Response(const FString& Method, const TSharedPt
 		}
 		else
 		{
-			Body = FString::Printf(TEXT("%s: %d"),
+			Body = FString::Printf(TEXT("%s: %s (%d)"),
 				*UAL_CommandUtils::LStr(TEXT("成功"), TEXT("Succeeded")),
 				*UAL_CommandUtils::LStr(TEXT("资产已导入"), TEXT("Asset(s) imported")),
 				Count);

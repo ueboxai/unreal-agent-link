@@ -8,6 +8,7 @@
 #include "Misc/PackageName.h"
 #include "Misc/FileHelper.h"
 #include "UObject/Package.h"
+#include "UObject/SavePackage.h"
 #include "UObject/UObjectGlobals.h"
 #include "UObject/ObjectResource.h"
 #include "Serialization/ArchiveReplaceObjectRef.h"
@@ -1063,13 +1064,8 @@ bool FUALNormalizedImporter::LoadAndFixReferences(FUALNormalizedImportSession& S
                     UE_LOG(LogNormalizedImport, Log, TEXT("准备移动资产: %s -> %s/%s"), 
                         *MainAsset->GetPathName(), *NewPath, *NewAssetName);
                     
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
-						// UE5.4+ 使用路径字符串构造
-						RenameData.Add(FAssetRenameData(MainAsset->GetPathName(), NewPath, NewAssetName));
-#else
-						// UE5.0~5.3 使用 UObject* 构造
-						RenameData.Add(FAssetRenameData(MainAsset, NewPath, NewAssetName));
-#endif
+					// 使用 TWeakObjectPtr<UObject> 构造函数，兼容所有 UE5 版本
+					RenameData.Add(FAssetRenameData(MainAsset, NewPath, NewAssetName));
                     Session.PackagesToSave.Add(Package);
                 }
                 else
@@ -1136,6 +1132,7 @@ bool FUALNormalizedImporter::SaveAndCleanup(FUALNormalizedImportSession& Session
                 SaveArgs.TopLevelFlags = RF_Standalone;
                 SaveArgs.SaveFlags = SAVE_NoError;
 
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
                 FSavePackageResultStruct Result = UPackage::Save(Package, nullptr, *PackageFilename, SaveArgs);
                 
                 if (Result.Result == ESavePackageResult::Success)
@@ -1147,6 +1144,17 @@ bool FUALNormalizedImporter::SaveAndCleanup(FUALNormalizedImportSession& Session
                     Session.Errors.Add(FString::Printf(TEXT("保存失败: %s"), *Package->GetName()));
                     bAllSaved = false;
                 }
+#else
+                if (UPackage::SavePackage(Package, nullptr, *PackageFilename, SaveArgs))
+                {
+                    UE_LOG(LogNormalizedImport, Log, TEXT("保存成功: %s"), *Package->GetName());
+                }
+                else
+                {
+                    Session.Errors.Add(FString::Printf(TEXT("保存失败: %s"), *Package->GetName()));
+                    bAllSaved = false;
+                }
+#endif
             }
         }
     }

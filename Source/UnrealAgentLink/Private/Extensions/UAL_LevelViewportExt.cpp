@@ -11,6 +11,7 @@
 #include "Misc/Paths.h"
 #include "Misc/App.h"
 #include "Misc/EngineVersion.h"
+#include "Misc/ConfigCacheIni.h"
 #include "GameFramework/Actor.h"
 #include "Engine/StaticMeshActor.h"
 #include "Components/StaticMeshComponent.h"
@@ -464,14 +465,15 @@ void FUAL_LevelViewportExt::AddProjectMeta(TSharedPtr<FJsonObject>& Payload) con
 	const FString ProjectName = FApp::GetProjectName();
 	FString ProjectVersion(TEXT("unspecified"));
 
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
-	// UE5.4+ 提供 GetProjectVersion
-	const FString RetrievedVersion = FApp::GetProjectVersion();
-	if (!RetrievedVersion.IsEmpty())
+	// 从项目设置中读取版本号
+	if (GConfig)
 	{
-		ProjectVersion = RetrievedVersion;
+		FString IniVersion;
+		if (GConfig->GetString(TEXT("/Script/EngineSettings.GeneralProjectSettings"), TEXT("ProjectVersion"), IniVersion, GGameIni) && !IniVersion.IsEmpty())
+		{
+			ProjectVersion = IniVersion;
+		}
 	}
-#endif
 
 	const FString EngineVersion = FEngineVersion::Current().ToString();
 

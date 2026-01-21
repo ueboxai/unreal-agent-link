@@ -13,16 +13,10 @@
 /**
  * 将日志级别转换为字符串（跨版本兼容）
  * 
- * 版本差异:
- * - UE5.4+: FLogVerbosity::ToString()
- * - UE5.0~5.3: FOutputDeviceHelper::VerbosityToString() (已弃用但仍可用)
+ * 使用手动映射方式，避免不同UE版本间FLogVerbosity API差异
  */
 static FString UALVerbosityToString(ELogVerbosity::Type Verbosity)
 {
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
-	return FLogVerbosity::ToString(Verbosity);
-#else
-	// UE5.0~5.3: VerbosityToString 已移除，手动映射
 	switch (Verbosity)
 	{
 	case ELogVerbosity::Fatal:       return TEXT("Fatal");
@@ -34,7 +28,6 @@ static FString UALVerbosityToString(ELogVerbosity::Type Verbosity)
 	case ELogVerbosity::VeryVerbose: return TEXT("VeryVerbose");
 	default:                         return TEXT("Unknown");
 	}
-#endif
 }
 
 void FUAL_LogInterceptor::Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const class FName& Category)

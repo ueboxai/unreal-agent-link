@@ -40,7 +40,6 @@ FString FUAL_MessageLogCommands::SeverityToString(int32 Severity)
 {
 	switch (Severity)
 	{
-	case EMessageSeverity::CriticalError: return TEXT("CriticalError");
 	case EMessageSeverity::Error: return TEXT("Error");
 	case EMessageSeverity::PerformanceWarning: return TEXT("PerformanceWarning");
 	case EMessageSeverity::Warning: return TEXT("Warning");

@@ -326,9 +326,19 @@ void FUAL_ContentBrowserExt::HandleImportToAgent(const TArray<FString>& Selected
 {
 	const FString PathsStr = FString::Join(SelectedPaths, TEXT(", "));
 
+	// 获取 AssetRegistry 用于扫描文件夹内资产
+	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+
 	// 构造发送的 JSON 报文
 	TArray<TSharedPtr<FJsonValue>> PathsArray;
 	TArray<TSharedPtr<FJsonValue>> RealPathsArray;
+	
+	// 收集文件夹内所有资产用于生成元数据
+	TSet<FName> ProcessedPackages;
+	TSet<FName> UserSelectedPackages;  // 用户直接选中的资产（文件夹内的）
+	TArray<FName> PackageQueue;
+	
 	for (const FString& Path : SelectedPaths)
 	{
 		PathsArray.Add(MakeShared<FJsonValueString>(Path));
@@ -351,6 +361,134 @@ void FUAL_ContentBrowserExt::HandleImportToAgent(const TArray<FString>& Selected
 				*LocalizedString(TEXT("无法转换包路径为文件路径"), TEXT("Failed to convert package path to file path")),
 				*Path);
 		}
+		
+		// 🔍 扫描文件夹内所有资产（递归）
+		TArray<FAssetData> FolderAssets;
+		AssetRegistry.GetAssetsByPath(FName(*Path), FolderAssets, true);  // true = 递归扫描
+		
+		for (const FAssetData& AssetData : FolderAssets)
+		{
+			if (!ProcessedPackages.Contains(AssetData.PackageName))
+			{
+				PackageQueue.Add(AssetData.PackageName);
+				ProcessedPackages.Add(AssetData.PackageName);
+				UserSelectedPackages.Add(AssetData.PackageName);  // 文件夹内的资产都标记为用户选中
+			}
+		}
+	}
+	
+	// BFS 遍历依赖图，收集所有 /Game 路径的依赖
+	int32 QueueIndex = 0;
+	while (QueueIndex < PackageQueue.Num())
+	{
+		FName CurrentPackage = PackageQueue[QueueIndex++];
+		
+		// 获取当前包的所有依赖
+		TArray<FName> Dependencies;
+		AssetRegistry.GetDependencies(CurrentPackage, Dependencies);
+		
+		for (const FName& DepPackage : Dependencies)
+		{
+			FString DepPath = DepPackage.ToString();
+			
+			// 只处理 /Game 路径的依赖（项目内资产）
+			if (DepPath.StartsWith(TEXT("/Game/")) && !ProcessedPackages.Contains(DepPackage))
+			{
+				PackageQueue.Add(DepPackage);
+				ProcessedPackages.Add(DepPackage);
+				// 依赖资产不加入 UserSelectedPackages
+			}
+		}
+	}
+	
+	UE_LOG(LogUALContentBrowser, Log, TEXT("📁 文件夹扫描完成: 选中 %d 个, 总共 %d 个资产(含依赖)"), 
+		UserSelectedPackages.Num(), PackageQueue.Num());
+	
+	// 构建资产元数据数组
+	TArray<TSharedPtr<FJsonValue>> AssetMetadataArray;
+	
+	for (const FName& PackageName : PackageQueue)
+	{
+		const FString PackagePath = PackageName.ToString();
+		
+		// 获取包中的资产数据
+		TArray<FAssetData> PackageAssets;
+		AssetRegistry.GetAssetsByPackageName(PackageName, PackageAssets);
+		
+		if (PackageAssets.Num() == 0)
+		{
+			UE_LOG(LogUALContentBrowser, Warning, TEXT("包 %s 中没有找到资产"), *PackagePath);
+			continue;
+		}
+		
+		const FAssetData& AssetData = PackageAssets[0];
+		
+		// 判断是否是地图（World），决定扩展名
+		bool bIsWorld = false;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+		bIsWorld = AssetData.AssetClassPath == UWorld::StaticClass()->GetClassPathName();
+#else
+		bIsWorld = AssetData.AssetClass == UWorld::StaticClass()->GetFName();
+#endif
+		const FString TargetExtension = bIsWorld ? FPackageName::GetMapPackageExtension() : FPackageName::GetAssetPackageExtension();
+
+		FString AssetFilename;
+		if (!FPackageName::TryConvertLongPackageNameToFilename(PackagePath, AssetFilename, TargetExtension))
+		{
+			UE_LOG(LogUALContentBrowser, Warning, TEXT("无法转换包路径: %s"), *PackagePath);
+			continue;
+		}
+		
+		// 构建资产元数据
+		TSharedPtr<FJsonObject> MetadataObj = MakeShared<FJsonObject>();
+		
+		MetadataObj->SetStringField(TEXT("name"), AssetData.AssetName.ToString());
+		MetadataObj->SetStringField(TEXT("package"), PackagePath);
+		
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+		MetadataObj->SetStringField(TEXT("class"), AssetData.AssetClassPath.GetAssetName().ToString());
+#else
+		MetadataObj->SetStringField(TEXT("class"), AssetData.AssetClass.ToString());
+#endif
+		
+		// 获取直接依赖（用于元数据记录）
+		TArray<FName> DirectDeps;
+		AssetRegistry.GetDependencies(PackageName, DirectDeps);
+		
+		TArray<TSharedPtr<FJsonValue>> DepsArray;
+		for (const FName& DepName : DirectDeps)
+		{
+			FString DepPath = DepName.ToString();
+			if (DepPath.StartsWith(TEXT("/Game/")))
+			{
+				DepsArray.Add(MakeShared<FJsonValueString>(DepPath));
+			}
+		}
+		MetadataObj->SetArrayField(TEXT("dependencies"), DepsArray);
+		
+		// 标记是否为用户选中的资产（主资产 vs 依赖资产）
+		const bool bIsSelected = UserSelectedPackages.Contains(PackageName);
+		MetadataObj->SetBoolField(TEXT("is_selected"), bIsSelected);
+		
+		// 获取文件大小
+		if (!AssetFilename.IsEmpty())
+		{
+			int64 FileSize = IFileManager::Get().FileSize(*AssetFilename);
+			if (FileSize >= 0)
+			{
+				MetadataObj->SetNumberField(TEXT("size"), (double)FileSize);
+			}
+		}
+		
+		// 🖼️ 获取资产缩略图（保存到临时文件，返回路径）
+		// 请求 512x512 的高清缩略图
+		FString ThumbnailPath = SaveAssetThumbnailToFile(AssetData, 512);
+		if (!ThumbnailPath.IsEmpty())
+		{
+			MetadataObj->SetStringField(TEXT("thumbnail_path"), ThumbnailPath);
+		}
+		
+		AssetMetadataArray.Add(MakeShared<FJsonValueObject>(MetadataObj));
 	}
 
 	TSharedPtr<FJsonObject> Payload = MakeShared<FJsonObject>();
@@ -358,6 +496,12 @@ void FUAL_ContentBrowserExt::HandleImportToAgent(const TArray<FString>& Selected
 	if (RealPathsArray.Num() > 0)
 	{
 		Payload->SetArrayField(TEXT("real_paths"), RealPathsArray);
+	}
+	
+	// 添加资产元数据
+	if (AssetMetadataArray.Num() > 0)
+	{
+		Payload->SetArrayField(TEXT("asset_metadata"), AssetMetadataArray);
 	}
 
 	AddProjectMeta(Payload);
@@ -373,9 +517,9 @@ void FUAL_ContentBrowserExt::HandleImportToAgent(const TArray<FString>& Selected
 	FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
 
 	FUAL_NetworkManager::Get().SendMessage(OutJson);
-	UE_LOG(LogUALContentBrowser, Verbose, TEXT("%s: %s"),
-		*LocalizedString(TEXT("已发送导入请求 JSON"), TEXT("Import folder request sent JSON")),
-		*OutJson);
+	UE_LOG(LogUALContentBrowser, Log, TEXT("%s: 共 %d 个资产"),
+		*LocalizedString(TEXT("已发送文件夹导入请求"), TEXT("Import folder request sent")),
+		AssetMetadataArray.Num());
 }
 
 void FUAL_ContentBrowserExt::HandleImportAssets(const TArray<FAssetData>& SelectedAssets)
@@ -559,18 +703,9 @@ void FUAL_ContentBrowserExt::AddProjectMeta(TSharedPtr<FJsonObject>& Payload) co
 	const FString ProjectName = FApp::GetProjectName();
 	FString ProjectVersion(TEXT("unspecified"));
 	bool bHasProjectVersion = false;
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
-	// UE5.4+ 提供版本号获取
-	const FString RetrievedVersion = FApp::GetProjectVersion();
-	if (!RetrievedVersion.IsEmpty())
-	{
-		ProjectVersion = RetrievedVersion;
-		bHasProjectVersion = true;
-	}
-#else
-	// UE5.0~5.3 无 GetProjectVersion，保持默认值
-#endif
-	if (!bHasProjectVersion && GConfig)
+
+	// 从项目设置中读取版本号
+	if (GConfig)
 	{
 		FString IniVersion;
 		if (GConfig->GetString(TEXT("/Script/EngineSettings.GeneralProjectSettings"), TEXT("ProjectVersion"), IniVersion, GGameIni) && !IniVersion.IsEmpty())

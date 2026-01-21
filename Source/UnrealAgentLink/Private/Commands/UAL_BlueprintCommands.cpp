@@ -786,7 +786,11 @@ void FUAL_BlueprintCommands::Handle_CreateBlueprint(const TSharedPtr<FJsonObject
 	const FString PackageFileName = FPackageName::LongPackageNameToFilename(PackageName, FPackageName::GetAssetPackageExtension());
 	FSavePackageArgs SaveArgs;
 	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
+	UPackage::Save(Package, Blueprint, *PackageFileName, SaveArgs);
+#else
 	UPackage::SavePackage(Package, Blueprint, *PackageFileName, SaveArgs);
+#endif
 
 	// Asset Registry
 	FAssetRegistryModule::AssetCreated(Blueprint);
@@ -1035,7 +1039,11 @@ void FUAL_BlueprintCommands::Handle_AddComponentToBlueprint(const TSharedPtr<FJs
 		FSavePackageArgs SaveArgs;
 		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
 		// 使用兼容写法，SavePackage 在不同版本返回值类型不同
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
+		UPackage::Save(Package, Blueprint, *PackageFileName, SaveArgs);
+#else
 		UPackage::SavePackage(Package, Blueprint, *PackageFileName, SaveArgs);
+#endif
 		bSaved = true; // 如果没有异常则认为保存成功
 	}
 
@@ -1305,7 +1313,11 @@ void FUAL_BlueprintCommands::Handle_SetBlueprintProperty(const TSharedPtr<FJsonO
 		const FString PackageFileName = FPackageName::LongPackageNameToFilename(PackageName, FPackageName::GetAssetPackageExtension());
 		FSavePackageArgs SaveArgs;
 		SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
+		UPackage::Save(Package, Blueprint, *PackageFileName, SaveArgs);
+#else
 		UPackage::SavePackage(Package, Blueprint, *PackageFileName, SaveArgs);
+#endif
 		bSaved = true;
 	}
 
@@ -2120,7 +2132,7 @@ void FUAL_BlueprintCommands::Handle_AddNodeToBlueprint(const TSharedPtr<FJsonObj
 			EventFuncName = TEXT("Receive") + EventFuncName;
 		}
 
-		UClass* OwnerClass = Blueprint->ParentClass ? Blueprint->ParentClass : AActor::StaticClass();
+		UClass* OwnerClass = Blueprint->ParentClass ? Blueprint->ParentClass.Get() : AActor::StaticClass();
 		UFunction* EventFunc = OwnerClass ? OwnerClass->FindFunctionByName(FName(*EventFuncName)) : nullptr;
 		// UClass::FindFunctionByName 默认会在父类链上查找；这里保持简单兼容
 		if (!EventFunc)
@@ -2545,7 +2557,11 @@ void FUAL_BlueprintCommands::Handle_AddNodeToBlueprint(const TSharedPtr<FJsonObj
 		// 尝试作为短名查找
 		if (!Struct)
 		{
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+			Struct = FindFirstObject<UScriptStruct>(*StructTypeStr, EFindFirstObjectOptions::NativeFirst);
+#else
 			Struct = FindObject<UScriptStruct>(ANY_PACKAGE, *StructTypeStr);
+#endif
 		}
 		if (!Struct)
 		{
@@ -2571,7 +2587,11 @@ void FUAL_BlueprintCommands::Handle_AddNodeToBlueprint(const TSharedPtr<FJsonObj
 			return;
 		}
 		UScriptStruct* Struct = LoadObject<UScriptStruct>(nullptr, *StructTypeStr);
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+		if (!Struct) Struct = FindFirstObject<UScriptStruct>(*StructTypeStr, EFindFirstObjectOptions::NativeFirst);
+#else
 		if (!Struct) Struct = FindObject<UScriptStruct>(ANY_PACKAGE, *StructTypeStr);
+#endif
 		
 		if (!Struct)
 		{
@@ -2582,9 +2602,9 @@ void FUAL_BlueprintCommands::Handle_AddNodeToBlueprint(const TSharedPtr<FJsonObj
 		FGraphNodeCreator<UK2Node_BreakStruct> NodeCreator(*Graph);
 		UK2Node_BreakStruct* StructNode = NodeCreator.CreateNode();
 		StructNode->StructType = Struct;
-#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 4)
-		// UE5.4+ 才有此成员
-		StructNode->bMadeAfterOverridePinInMake = true;
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6)
+		// UE5.6+ 使用 bMadeAfterOverridePinRemoval (已验证 5.6 源码)
+		StructNode->bMadeAfterOverridePinRemoval = true;
 #endif
 		StructNode->NodePosX = PosX;
 		StructNode->NodePosY = PosY;
@@ -3428,7 +3448,11 @@ void FUAL_BlueprintCommands::Handle_CompileBlueprint(const TSharedPtr<FJsonObjec
 			const FString PackageFileName = FPackageName::LongPackageNameToFilename(Package->GetName(), FPackageName::GetAssetPackageExtension());
 			FSavePackageArgs SaveArgs;
 			SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 7
+			UPackage::Save(Package, Blueprint, *PackageFileName, SaveArgs);
+#else
 			UPackage::SavePackage(Package, Blueprint, *PackageFileName, SaveArgs);
+#endif
 			bSaved = true;
 		}
 	}
@@ -3916,7 +3940,7 @@ static UEdGraphNode* UAL_CreateNodeInternal(
 			EventFuncName = TEXT("Receive") + EventFuncName;
 		}
 
-		UClass* OwnerClass = Blueprint->ParentClass ? Blueprint->ParentClass : AActor::StaticClass();
+		UClass* OwnerClass = Blueprint->ParentClass ? Blueprint->ParentClass.Get() : AActor::StaticClass();
 		UFunction* EventFunc = OwnerClass ? OwnerClass->FindFunctionByName(FName(*EventFuncName)) : nullptr;
 		if (!EventFunc)
 		{
