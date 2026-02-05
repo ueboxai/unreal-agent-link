@@ -6,7 +6,7 @@ class AActor;
 
 /**
  * 关卡视口Actor右键菜单扩展
- * 在视口中选中Actor后右键，可以看到"导入到虚幻助手资产库"选项
+ * 在视口中选中Actor后右键，可以看到"导入到虚幻盒子资产库"选项
  */
 class FUAL_LevelViewportExt
 {
@@ -40,7 +40,7 @@ private:
 	void AddMenuEntry(FMenuBuilder& MenuBuilder, TArray<AActor*> SelectedActors);
 
 	/**
-	 * 处理导入选中Actor的资产到虚幻助手
+	 * 处理导入选中Actor的资产到虚幻盒子
 	 * @param SelectedActors 选中的Actor列表
 	 */
 	void HandleImportActorAssets(const TArray<AActor*>& SelectedActors);

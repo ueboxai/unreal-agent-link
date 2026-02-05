@@ -81,17 +81,44 @@ void FUAL_SystemCommands::Handle_RunPython(const TSharedPtr<FJsonObject>& Payloa
 		return;
 	}
 
+	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	bool bExecuted = false;
+
 #if defined(WITH_PYTHON) && WITH_PYTHON
 	if (IPythonScriptPlugin::IsAvailable())
 	{
-		bExecuted = IPythonScriptPlugin::Get()->ExecPythonCommand(*Script);
+		// 使用扩展版本获取详细输出
+		FPythonCommandEx PythonCommand;
+		PythonCommand.Command = Script;
+		PythonCommand.ExecutionMode = EPythonCommandExecutionMode::ExecuteFile;
+		PythonCommand.FileExecutionScope = EPythonFileExecutionScope::Public; // 共享环境，便于后续脚本访问变量
+		
+		bExecuted = IPythonScriptPlugin::Get()->ExecPythonCommandEx(PythonCommand);
+		
+		// 返回脚本结果（成功时为表达式结果，失败时为错误追踪）
+		if (!PythonCommand.CommandResult.IsEmpty())
+		{
+			Data->SetStringField(TEXT("result"), PythonCommand.CommandResult);
+		}
+		
+		// 收集日志输出（print()、unreal.log() 等）
+		if (PythonCommand.LogOutput.Num() > 0)
+		{
+			TArray<TSharedPtr<FJsonValue>> LogArray;
+			for (const FPythonLogOutputEntry& Entry : PythonCommand.LogOutput)
+			{
+				TSharedPtr<FJsonObject> LogEntry = MakeShared<FJsonObject>();
+				LogEntry->SetStringField(TEXT("type"), LexToString(Entry.Type));
+				LogEntry->SetStringField(TEXT("message"), Entry.Output);
+				LogArray.Add(MakeShared<FJsonValueObject>(LogEntry));
+			}
+			Data->SetArrayField(TEXT("logs"), LogArray);
+		}
 	}
 #else
 	UE_LOG(LogUALSystem, Warning, TEXT("WITH_PYTHON is not enabled; skip exec"));
 #endif
 
-	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
 	Data->SetBoolField(TEXT("ok"), bExecuted);
 	UAL_CommandUtils::SendResponse(RequestId, bExecuted ? 200 : 500, Data);
 }

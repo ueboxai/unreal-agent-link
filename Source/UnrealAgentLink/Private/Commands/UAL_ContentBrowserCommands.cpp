@@ -580,7 +580,10 @@ void FUAL_ContentBrowserCommands::Handle_ImportAssets(
 			// 获取源文件名（不含扩展名），用于查找规范化名称
 			const FString SourceBaseName = FPaths::GetBaseFilename(Task->Filename);
 			
-			for (const FString& ObjectPath : Task->ImportedObjectPaths)
+			// 复制数组以避免在重命名操作中修改原数组导致崩溃
+			// ("Array has changed during ranged-for iteration" bug fix)
+			TArray<FString> ObjectPathsCopy = Task->ImportedObjectPaths;
+			for (const FString& ObjectPath : ObjectPathsCopy)
 			{
 				// 检查路径是否为空
 				if (ObjectPath.IsEmpty())

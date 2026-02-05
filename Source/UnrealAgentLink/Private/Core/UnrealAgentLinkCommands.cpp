@@ -6,7 +6,7 @@
 
 void FUnrealAgentLinkCommands::RegisterCommands()
 {
-	UI_COMMAND(PluginAction, "UnrealAgentLink", "Unreal Agent Link Status", EUserInterfaceActionType::Button, FInputChord());
+	UI_COMMAND(PluginAction, "UnrealAgentLink", "Unreal Box Link Status", EUserInterfaceActionType::Button, FInputChord());
 }
 
 #undef LOCTEXT_NAMESPACE

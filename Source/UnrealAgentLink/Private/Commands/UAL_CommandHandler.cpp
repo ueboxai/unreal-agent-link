@@ -9,8 +9,11 @@
 #include "UAL_ContentBrowserCommands.h"
 #include "UAL_MaterialCommands.h"
 #include "UAL_MessageLogCommands.h"
+#include "UAL_WidgetCommands.h"
+
 
 #include "Async/Async.h"
+#include "Containers/Ticker.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Framework/Application/SlateApplication.h"
@@ -34,10 +37,18 @@ void FUAL_CommandHandler::ProcessMessage(const FString& JsonPayload)
 {
 	if (!IsInGameThread())
 	{
-		AsyncTask(ENamedThreads::GameThread, [this, Payload = JsonPayload]()
-		{
-			ProcessMessage(Payload);
-		});
+		// UE 5.7 修复：使用 Ticker 而不是 AsyncTask 调度到 GameThread
+		// AsyncTask 会在 TaskGraph 上下文中执行，当后续调用 Interchange 导入时
+		// 会触发 TaskGraph 递归保护断言崩溃 (++Queue(QueueIndex).RecursionGuard == 1)
+		// 使用 Ticker 可以确保代码在正常的 Tick 上下文中执行，脱离 TaskGraph
+		FTSTicker::GetCoreTicker().AddTicker(
+			FTickerDelegate::CreateLambda([this, Payload = JsonPayload](float DeltaTime) -> bool
+			{
+				ProcessMessage(Payload);
+				return false; // 只执行一次
+			}),
+			0.0f // 立即在下一个 Tick 执行
+		);
 		return;
 	}
 
@@ -113,6 +124,8 @@ void FUAL_CommandHandler::RegisterCommands()
 	FUAL_ContentBrowserCommands::RegisterCommands(CommandMap);
 	FUAL_MaterialCommands::RegisterCommands(CommandMap);
 	FUAL_MessageLogCommands::RegisterCommands(CommandMap);
+	FUAL_WidgetCommands::RegisterCommands(CommandMap);
+
 }
 
 void FUAL_CommandHandler::Handle_Response(const FString& Method, const TSharedPtr<FJsonObject>& Payload)
@@ -151,8 +164,8 @@ void FUAL_CommandHandler::Handle_Response(const FString& Method, const TSharedPt
 	}
 
 	const FString Title = bIsImportFolder
-		? UAL_CommandUtils::LStr(TEXT("导入文件夹到虚幻助手资产库"), TEXT("Import Folder to Unreal Agent Asset Library"))
-		: UAL_CommandUtils::LStr(TEXT("导入资产到虚幻助手资产库"), TEXT("Import Assets to Unreal Agent Asset Library"));
+		? UAL_CommandUtils::LStr(TEXT("导入文件夹到虚幻盒子资产库"), TEXT("Import Folder to Unreal Box Asset Library"))
+		: UAL_CommandUtils::LStr(TEXT("导入资产到虚幻盒子资产库"), TEXT("Import Assets to Unreal Box Asset Library"));
 
 	FString Body;
 	if (bOk)

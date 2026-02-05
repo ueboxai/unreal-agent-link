@@ -290,11 +290,11 @@ TSharedRef<FExtender> FUAL_ContentBrowserExt::OnExtendAssetMenu(const TArray<FAs
 
 void FUAL_ContentBrowserExt::AddMenuEntry(FMenuBuilder& MenuBuilder, TArray<FString> SelectedPaths)
 {
-	MenuBuilder.BeginSection(NAME_None, LocalizedText(TEXT("UALSection"), TEXT("虚幻助手"), TEXT("Unreal Agent")));
+	MenuBuilder.BeginSection(NAME_None, LocalizedText(TEXT("UALSection"), TEXT("虚幻盒子"), TEXT("Unreal Box")));
 	{
 		MenuBuilder.AddMenuEntry(
-			LocalizedText(TEXT("UALImportToAgent"), TEXT("导入到虚幻助手资产库"), TEXT("Import into Unreal Agent Asset Library")),
-			LocalizedText(TEXT("UALImportToAgentTooltip"), TEXT("将选中的文件夹及其内容导入到虚幻助手中（虚幻助手需要处于打开状态）"), TEXT("Import selected folders and contents into Unreal Agent (Unreal Agent must be running)")),
+			LocalizedText(TEXT("UALImportToAgent"), TEXT("导入到虚幻盒子资产库"), TEXT("Import into Unreal Box Asset Library")),
+			LocalizedText(TEXT("UALImportToAgentTooltip"), TEXT("将选中的文件夹及其内容导入到虚幻盒子中（虚幻盒子需要处于打开状态）"), TEXT("Import selected folders and contents into Unreal Box (Unreal Box must be running)")),
 			FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Import"),
 			FUIAction(FExecuteAction::CreateLambda([this, SelectedPaths]()
 			{
@@ -307,11 +307,11 @@ void FUAL_ContentBrowserExt::AddMenuEntry(FMenuBuilder& MenuBuilder, TArray<FStr
 
 void FUAL_ContentBrowserExt::AddAssetMenuEntry(FMenuBuilder& MenuBuilder, TArray<FAssetData> SelectedAssets)
 {
-	MenuBuilder.BeginSection(NAME_None, LocalizedText(TEXT("UALSectionAsset"), TEXT("虚幻助手"), TEXT("Unreal Agent")));
+	MenuBuilder.BeginSection(NAME_None, LocalizedText(TEXT("UALSectionAsset"), TEXT("虚幻盒子"), TEXT("Unreal Box")));
 	{
 		MenuBuilder.AddMenuEntry(
-			LocalizedText(TEXT("UALImportAssets"), TEXT("导入到虚幻助手资产库"), TEXT("Import into Unreal Agent Asset Library")),
-			LocalizedText(TEXT("UALImportAssetsTooltip"), TEXT("将选中的资产导入到虚幻助手中（虚幻助手需要处于打开状态）"), TEXT("Import selected assets into Unreal Agent (Unreal Agent must be running)")),
+			LocalizedText(TEXT("UALImportAssets"), TEXT("导入到虚幻盒子资产库"), TEXT("Import into Unreal Box Asset Library")),
+			LocalizedText(TEXT("UALImportAssetsTooltip"), TEXT("将选中的资产导入到虚幻盒子中（虚幻盒子需要处于打开状态）"), TEXT("Import selected assets into Unreal Box (Unreal Box must be running)")),
 			FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Import"),
 			FUIAction(FExecuteAction::CreateLambda([this, SelectedAssets]()
 			{
@@ -352,7 +352,7 @@ void FUAL_ContentBrowserExt::HandleImportToAgent(const TArray<FString>& Selected
 			const FString FullPath = FPaths::ConvertRelativePathToFull(Filename);
 			RealPathsArray.Add(MakeShared<FJsonValueString>(FullPath));
 			UE_LOG(LogUALContentBrowser, Log, TEXT("%s"), *FString::Printf(TEXT("%s %s -> %s"),
-				*LocalizedString(TEXT("导入到虚幻助手资产库"), TEXT("Import into Unreal Agent Asset Library")),
+				*LocalizedString(TEXT("导入到虚幻盒子资产库"), TEXT("Import into Unreal Box Asset Library")),
 				*Path, *FullPath));
 		}
 		else

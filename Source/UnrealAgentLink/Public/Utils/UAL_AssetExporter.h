@@ -1,4 +1,4 @@
-// Copyright 2024 Unreal Agent. All Rights Reserved.
+// Copyright 2024 Unreal Box. All Rights Reserved.
 
 #pragma once
 
@@ -8,7 +8,7 @@
 
 /**
  * 资产导出工具类
- * 统一处理从视口和内容浏览器导出资产到虚幻助手的逻辑
+ * 统一处理从视口和内容浏览器导出资产到虚幻盒子的逻辑
  */
 class UNREALAGENTLINK_API FUAL_AssetExporter
 {

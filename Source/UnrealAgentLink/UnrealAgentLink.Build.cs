@@ -86,6 +86,7 @@ public class UnrealAgentLink : ModuleRules
 				"MediaAssets", // Added for FileMediaSource support
 				"ImageWrapper",  // Added for screenshot support
 				"UMG", // Added for FWidgetRenderer
+				"UMGEditor", // Added for UWidgetBlueprint support
 				"LevelEditor", // Added for SLevelViewport and FLevelEditorViewportClient
 				"EngineSettings", // Added for UGameMapsSettings
 				"MessageLog" // Added for FMessageLogModule (MessageLog commands)
@@ -93,9 +94,11 @@ public class UnrealAgentLink : ModuleRules
 			);
 
 		// UE 5.1+ 可能需要额外模块，这里预留动态依赖
-		if (Target.Version.MajorVersion == 5 && Target.Version.MinorVersion >= 1)
+		// Note: Target.Version 仅在 UE 5.1+ 可用，使用 ReadOnlyBuildVersion 兼容 5.0
+		#if UE_5_1_OR_LATER
 		{
 			// 示例：可在此添加 5.1+ 特有模块
 		}
+		#endif
 	}
 }

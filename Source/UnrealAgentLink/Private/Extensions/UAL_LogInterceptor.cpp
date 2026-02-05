@@ -36,7 +36,7 @@ void FUAL_LogInterceptor::Serialize(const TCHAR* V, ELogVerbosity::Type Verbosit
 	static TAutoConsoleVariable<int32> CVarForwardLogs(
 		TEXT("ual.ForwardLogs"),
 		0,
-		TEXT("Forward UE logs to Unreal Agent (0=off, 1=on)"),
+		TEXT("Forward UE logs to Unreal Box (0=off, 1=on)"),
 		ECVF_Default);
 
 	if (!bIsCaptureEnabled || CVarForwardLogs.GetValueOnAnyThread() == 0)

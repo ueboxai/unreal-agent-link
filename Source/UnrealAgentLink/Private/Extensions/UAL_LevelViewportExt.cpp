@@ -270,11 +270,11 @@ TSharedRef<FExtender> FUAL_LevelViewportExt::OnExtendActorContextMenu(
 
 void FUAL_LevelViewportExt::AddMenuEntry(FMenuBuilder& MenuBuilder, TArray<AActor*> SelectedActors)
 {
-	MenuBuilder.BeginSection(NAME_None, UALViewportUtils::LText(TEXT("UALSectionActor"), TEXT("虚幻助手"), TEXT("Unreal Agent")));
+	MenuBuilder.BeginSection(NAME_None, UALViewportUtils::LText(TEXT("UALSectionActor"), TEXT("虚幻盒子"), TEXT("Unreal Box")));
 	{
 		MenuBuilder.AddMenuEntry(
-			UALViewportUtils::LText(TEXT("UALImportActorAssets"), TEXT("导入到虚幻助手资产库"), TEXT("Import into Unreal Agent Asset Library")),
-			UALViewportUtils::LText(TEXT("UALImportActorAssetsTooltip"), TEXT("将选中Actor引用的资产导入到虚幻助手中（虚幻助手需要处于打开状态）"), TEXT("Import assets referenced by selected actors into Unreal Agent (Unreal Agent must be running)")),
+			UALViewportUtils::LText(TEXT("UALImportActorAssets"), TEXT("导入到虚幻盒子资产库"), TEXT("Import into Unreal Box Asset Library")),
+			UALViewportUtils::LText(TEXT("UALImportActorAssetsTooltip"), TEXT("将选中Actor引用的资产导入到虚幻盒子中（虚幻盒子需要处于打开状态）"), TEXT("Import assets referenced by selected actors into Unreal Box (Unreal Box must be running)")),
 			FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Import"),
 			FUIAction(FExecuteAction::CreateLambda([this, SelectedActors]()
 			{
