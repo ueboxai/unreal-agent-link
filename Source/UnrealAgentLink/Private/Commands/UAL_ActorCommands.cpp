@@ -541,8 +541,9 @@ void FUAL_ActorCommands::Handle_GetActorInfo(const TSharedPtr<FJsonObject>& Payl
 	Payload->TryGetBoolField(TEXT("return_bounds"), bReturnBounds);
 
 	int32 Limit = 50;
-	Payload->TryGetNumberField(TEXT("limit"), Limit);
-	if (Limit <= 0)
+	const bool bHasLimitField = Payload->TryGetNumberField(TEXT("limit"), Limit);
+	const bool bCountOnly = bHasLimitField && Limit == 0;
+	if (!bCountOnly && Limit <= 0)
 	{
 		Limit = 50;
 	}
@@ -573,11 +574,14 @@ void FUAL_ActorCommands::Handle_GetActorInfo(const TSharedPtr<FJsonObject>& Payl
 	});
 
 	TArray<TSharedPtr<FJsonValue>> ActorsJson;
-	for (int32 Index = 0; Index < TargetArray.Num() && Index < Limit; ++Index)
+	if (!bCountOnly)
 	{
-		if (TSharedPtr<FJsonObject> Info = UAL_CommandUtils::BuildActorInfoWithOptions(TargetArray[Index], bReturnTransform, bReturnBounds))
+		for (int32 Index = 0; Index < TargetArray.Num() && Index < Limit; ++Index)
 		{
-			ActorsJson.Add(MakeShared<FJsonValueObject>(Info));
+			if (TSharedPtr<FJsonObject> Info = UAL_CommandUtils::BuildActorInfoWithOptions(TargetArray[Index], bReturnTransform, bReturnBounds))
+			{
+				ActorsJson.Add(MakeShared<FJsonValueObject>(Info));
+			}
 		}
 	}
 
