@@ -41,6 +41,7 @@ public:
 
 	// blueprint.get_graph - 获取蓝图图表（节点、引脚等）
 	static void Handle_GetBlueprintGraph(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	static void Handle_ListBlueprintGraphs(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 
 	// blueprint.add_node - 在图表中添加节点
 	static void Handle_AddNodeToBlueprint(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);

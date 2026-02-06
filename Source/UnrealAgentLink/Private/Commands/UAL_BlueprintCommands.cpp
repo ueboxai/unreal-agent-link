@@ -78,6 +78,11 @@ void FUAL_BlueprintCommands::RegisterCommands(TMap<FString, TFunction<void(const
 		Handle_GetBlueprintGraph(Payload, RequestId);
 	});
 
+	CommandMap.Add(TEXT("blueprint.list_graphs"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_ListBlueprintGraphs(Payload, RequestId);
+	});
+
 	CommandMap.Add(TEXT("blueprint.add_node"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
 	{
 		Handle_AddNodeToBlueprint(Payload, RequestId);
@@ -170,6 +175,106 @@ static UEdGraph* UAL_FindGraph(UBlueprint* Blueprint, const FString& GraphName)
 	return nullptr;
 }
 
+static TSharedPtr<FJsonObject> UAL_BuildGraphRefJson(UEdGraph* Graph, const FString& GraphType)
+{
+	if (!Graph)
+	{
+		return nullptr;
+	}
+
+	TSharedPtr<FJsonObject> GraphObj = MakeShared<FJsonObject>();
+	GraphObj->SetStringField(TEXT("name"), Graph->GetName());
+	GraphObj->SetStringField(TEXT("type"), GraphType);
+	GraphObj->SetStringField(TEXT("title"), Graph->GetName());
+	return GraphObj;
+}
+
+struct FUAL_GraphDiscoveryResult
+{
+	TArray<TSharedPtr<FJsonValue>> Graphs;
+	TArray<TSharedPtr<FJsonValue>> EventGraphs;
+	TArray<TSharedPtr<FJsonValue>> FunctionGraphs;
+	TArray<TSharedPtr<FJsonValue>> MacroGraphs;
+	TArray<TSharedPtr<FJsonValue>> DelegateGraphs;
+	TArray<TSharedPtr<FJsonValue>> IntermediateGraphs;
+	TArray<TSharedPtr<FJsonValue>> GraphNames;
+	TSet<FString> SeenGraphNames;
+	FString PreferredGraphName;
+
+	void AddGraph(
+		UEdGraph* Graph,
+		const TCHAR* GraphType,
+		TArray<TSharedPtr<FJsonValue>>& TypedArray,
+		bool bPreferAsDefault = false)
+	{
+		if (!Graph)
+		{
+			return;
+		}
+
+		const FString GraphName = Graph->GetName();
+		const FString GraphKey = GraphName.ToLower();
+		if (SeenGraphNames.Contains(GraphKey))
+		{
+			return;
+		}
+		SeenGraphNames.Add(GraphKey);
+
+		if (PreferredGraphName.IsEmpty() && (bPreferAsDefault || GraphName.Equals(TEXT("EventGraph"), ESearchCase::IgnoreCase)))
+		{
+			PreferredGraphName = GraphName;
+		}
+		if (PreferredGraphName.IsEmpty() && GraphName.Equals(TEXT("ConstructionScript"), ESearchCase::IgnoreCase))
+		{
+			PreferredGraphName = GraphName;
+		}
+		if (PreferredGraphName.IsEmpty())
+		{
+			PreferredGraphName = GraphName;
+		}
+
+		GraphNames.Add(MakeShared<FJsonValueString>(GraphName));
+
+		if (TSharedPtr<FJsonObject> GraphObj = UAL_BuildGraphRefJson(Graph, GraphType))
+		{
+			Graphs.Add(MakeShared<FJsonValueObject>(GraphObj));
+			TypedArray.Add(MakeShared<FJsonValueObject>(GraphObj));
+		}
+	}
+};
+
+static FUAL_GraphDiscoveryResult UAL_CollectBlueprintGraphs(UBlueprint* Blueprint)
+{
+	FUAL_GraphDiscoveryResult Result;
+	if (!Blueprint)
+	{
+		return Result;
+	}
+
+	for (UEdGraph* Graph : Blueprint->UbergraphPages)
+	{
+		Result.AddGraph(Graph, TEXT("event"), Result.EventGraphs, true);
+	}
+	for (UEdGraph* Graph : Blueprint->FunctionGraphs)
+	{
+		Result.AddGraph(Graph, TEXT("function"), Result.FunctionGraphs);
+	}
+	for (UEdGraph* Graph : Blueprint->MacroGraphs)
+	{
+		Result.AddGraph(Graph, TEXT("macro"), Result.MacroGraphs);
+	}
+	for (UEdGraph* Graph : Blueprint->DelegateSignatureGraphs)
+	{
+		Result.AddGraph(Graph, TEXT("delegate"), Result.DelegateGraphs);
+	}
+	for (UEdGraph* Graph : Blueprint->IntermediateGeneratedGraphs)
+	{
+		Result.AddGraph(Graph, TEXT("intermediate"), Result.IntermediateGraphs);
+	}
+
+	return Result;
+}
+
 static UEdGraphNode* UAL_FindNodeByGuid(UEdGraph* Graph, const FString& NodeId)
 {
 	if (!Graph || NodeId.IsEmpty())
@@ -244,6 +349,30 @@ static TArray<TSharedPtr<FJsonValue>> UAL_BuildPinsJson(UEdGraphNode* Node)
 
 		// 友好名（UI 可能展示的 label），但 Agent 不应当用它做连线依据
 		PinObj->SetStringField(TEXT("friendly_name"), Pin->PinFriendlyName.ToString());
+
+		TArray<TSharedPtr<FJsonValue>> LinkedToArray;
+		for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
+		{
+			if (!LinkedPin)
+			{
+				continue;
+			}
+
+			TSharedPtr<FJsonObject> LinkObj = MakeShared<FJsonObject>();
+			LinkObj->SetStringField(TEXT("pin_name"), LinkedPin->PinName.ToString());
+			LinkObj->SetStringField(TEXT("dir"), UAL_PinDirToString(LinkedPin->Direction));
+			if (UEdGraphNode* OwnerNode = LinkedPin->GetOwningNode())
+			{
+				LinkObj->SetStringField(TEXT("node_id"), UAL_GuidToString(OwnerNode->NodeGuid));
+				LinkObj->SetStringField(TEXT("node_class"), OwnerNode->GetClass()->GetName());
+				LinkObj->SetStringField(TEXT("node_title"), OwnerNode->GetNodeTitle(ENodeTitleType::ListView).ToString());
+			}
+			LinkedToArray.Add(MakeShared<FJsonValueObject>(LinkObj));
+		}
+		PinObj->SetArrayField(TEXT("linked_to"), LinkedToArray);
+		PinObj->SetNumberField(TEXT("linked_count"), LinkedToArray.Num());
+		PinObj->SetBoolField(TEXT("is_connected"), LinkedToArray.Num() > 0);
+
 		Pins.Add(MakeShared<FJsonValueObject>(PinObj));
 	}
 	return Pins;
@@ -1634,6 +1763,51 @@ void FUAL_BlueprintCommands::Handle_GetBlueprintGraph(const TSharedPtr<FJsonObje
  * 响应:
  *   - ok, node_id, pins[]
  */
+void FUAL_BlueprintCommands::Handle_ListBlueprintGraphs(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+	FString BlueprintPath;
+	if (!Payload->TryGetStringField(TEXT("blueprint_path"), BlueprintPath) || BlueprintPath.IsEmpty())
+	{
+		if (!Payload->TryGetStringField(TEXT("blueprint_name"), BlueprintPath) || BlueprintPath.IsEmpty())
+		{
+			UAL_CommandUtils::SendError(
+				RequestId,
+				400,
+				TEXT("Missing required field: blueprint_path (or blueprint_name). Example: {\"blueprint_path\": \"/Game/Blueprints/BP_Hero\"}")
+			);
+			return;
+		}
+	}
+
+	UBlueprint* Blueprint = nullptr;
+	FString ResolvedPath;
+	if (!UAL_LoadBlueprintByPathOrName(BlueprintPath, Blueprint, ResolvedPath) || !Blueprint)
+	{
+		UAL_CommandUtils::SendError(RequestId, 404, FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		return;
+	}
+
+	const FUAL_GraphDiscoveryResult GraphDiscovery = UAL_CollectBlueprintGraphs(Blueprint);
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("ok"), true);
+	Result->SetStringField(TEXT("blueprint_path"), Blueprint->GetPathName());
+	Result->SetNumberField(TEXT("graph_count"), GraphDiscovery.Graphs.Num());
+	Result->SetArrayField(TEXT("graph_names"), GraphDiscovery.GraphNames);
+	Result->SetArrayField(TEXT("graphs"), GraphDiscovery.Graphs);
+	Result->SetArrayField(TEXT("event_graphs"), GraphDiscovery.EventGraphs);
+	Result->SetArrayField(TEXT("function_graphs"), GraphDiscovery.FunctionGraphs);
+	Result->SetArrayField(TEXT("macro_graphs"), GraphDiscovery.MacroGraphs);
+	Result->SetArrayField(TEXT("delegate_graphs"), GraphDiscovery.DelegateGraphs);
+	Result->SetArrayField(TEXT("intermediate_graphs"), GraphDiscovery.IntermediateGraphs);
+	if (!GraphDiscovery.PreferredGraphName.IsEmpty())
+	{
+		Result->SetStringField(TEXT("preferred_graph"), GraphDiscovery.PreferredGraphName);
+	}
+
+	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
+}
+
 void FUAL_BlueprintCommands::Handle_AddNodeToBlueprint(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
 {
 	// ===== 批量模式检测 =====
@@ -3605,6 +3779,21 @@ TSharedPtr<FJsonObject> FUAL_BlueprintCommands::BuildBlueprintStructureJson(
 	if (bIncludeVariables)
 	{
 		Result->SetArrayField(TEXT("variables"), CollectVariablesInfo(Blueprint));
+	}
+
+	const FUAL_GraphDiscoveryResult GraphDiscovery = UAL_CollectBlueprintGraphs(Blueprint);
+	Result->SetNumberField(TEXT("graph_count"), GraphDiscovery.Graphs.Num());
+	Result->SetArrayField(TEXT("graph_names"), GraphDiscovery.GraphNames);
+	Result->SetArrayField(TEXT("graphs"), GraphDiscovery.Graphs);
+	Result->SetArrayField(TEXT("event_graphs"), GraphDiscovery.EventGraphs);
+	Result->SetArrayField(TEXT("function_graphs"), GraphDiscovery.FunctionGraphs);
+	Result->SetArrayField(TEXT("macro_graphs"), GraphDiscovery.MacroGraphs);
+	Result->SetArrayField(TEXT("delegate_graphs"), GraphDiscovery.DelegateGraphs);
+	Result->SetArrayField(TEXT("intermediate_graphs"), GraphDiscovery.IntermediateGraphs);
+	Result->SetBoolField(TEXT("has_event_graph"), GraphDiscovery.EventGraphs.Num() > 0);
+	if (!GraphDiscovery.PreferredGraphName.IsEmpty())
+	{
+		Result->SetStringField(TEXT("preferred_graph"), GraphDiscovery.PreferredGraphName);
 	}
 	
 	// 编译状态

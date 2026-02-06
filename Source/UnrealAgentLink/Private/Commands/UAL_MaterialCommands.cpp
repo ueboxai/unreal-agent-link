@@ -283,6 +283,7 @@ void FUAL_MaterialCommands::Handle_ApplyMaterial(
 		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required field: material_path"));
 		return;
 	}
+	MaterialPath = NormalizePath(MaterialPath);
 
 	// 2. 加载材质
 	UMaterialInterface* Material = LoadObject<UMaterialInterface>(nullptr, *MaterialPath);
@@ -390,6 +391,7 @@ void FUAL_MaterialCommands::Handle_DescribeMaterial(
 		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required field: path"));
 		return;
 	}
+	MaterialPath = NormalizePath(MaterialPath);
 
 	// 2. 加载材质
 	UMaterialInterface* Material = LoadObject<UMaterialInterface>(nullptr, *MaterialPath);
@@ -502,6 +504,7 @@ void FUAL_MaterialCommands::Handle_SetMaterialParam(
 		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required field: path"));
 		return;
 	}
+	MaterialPath = NormalizePath(MaterialPath);
 
 	// 2. 加载材质（必须是 MaterialInstanceConstant）
 	UMaterialInstanceConstant* MatInst = LoadObject<UMaterialInstanceConstant>(nullptr, *MaterialPath);
@@ -625,6 +628,7 @@ void FUAL_MaterialCommands::Handle_GetMaterialGraph(
 		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required field: path"));
 		return;
 	}
+	MaterialPath = NormalizePath(MaterialPath);
 
 	// 2. 加载材质（必须是 UMaterial，不能是 Instance）
 	UMaterial* Material = LoadObject<UMaterial>(nullptr, *MaterialPath);
@@ -731,6 +735,7 @@ void FUAL_MaterialCommands::Handle_AddMaterialNode(
 		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required field: material_path"));
 		return;
 	}
+	MaterialPath = NormalizePath(MaterialPath);
 
 	FString NodeType;
 	if (!Payload->TryGetStringField(TEXT("node_type"), NodeType) || NodeType.IsEmpty())
@@ -956,6 +961,7 @@ void FUAL_MaterialCommands::Handle_ConnectMaterialPins(
 		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required field: material_path"));
 		return;
 	}
+	MaterialPath = NormalizePath(MaterialPath);
 
 	FString SourceNode, SourcePin, TargetNode, TargetPin;
 	if (!Payload->TryGetStringField(TEXT("source_node"), SourceNode) ||
@@ -1192,6 +1198,7 @@ void FUAL_MaterialCommands::Handle_CompileMaterial(
 		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required field: path"));
 		return;
 	}
+	MaterialPath = NormalizePath(MaterialPath);
 
 	// 2. 加载材质
 	UMaterialInterface* MaterialInterface = LoadObject<UMaterialInterface>(nullptr, *MaterialPath);
@@ -1288,6 +1295,7 @@ void FUAL_MaterialCommands::Handle_SetMaterialNodeValue(
 		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required field: material_path"));
 		return;
 	}
+	MaterialPath = NormalizePath(MaterialPath);
 
 	FString NodeId;
 	if (!Payload->TryGetStringField(TEXT("node_id"), NodeId) || NodeId.IsEmpty())
@@ -1476,6 +1484,7 @@ void FUAL_MaterialCommands::Handle_DeleteMaterialNode(
 		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing required field: material_path"));
 		return;
 	}
+	MaterialPath = NormalizePath(MaterialPath);
 
 	FString NodeId;
 	if (!Payload->TryGetStringField(TEXT("node_id"), NodeId) || NodeId.IsEmpty())
