@@ -64,6 +64,41 @@
 DEFINE_LOG_CATEGORY_STATIC(LogUALWidget, Log, All);
 
 // ============================================================================
+// 辅助：生成唯一 Widget 名称（防止重名崩溃）
+// ============================================================================
+
+static FName MakeUniqueWidgetName(UWidgetTree* WidgetTree, const FString& DesiredName)
+{
+	if (DesiredName.IsEmpty())
+	{
+		return NAME_None; // 让 ConstructWidget 自动生成
+	}
+
+	FName TestName(*DesiredName);
+	if (!WidgetTree->FindWidget(TestName))
+	{
+		return TestName;
+	}
+
+	// 名称冲突，追加后缀
+	for (int32 i = 1; i < 1000; ++i)
+	{
+		FString SuffixedName = FString::Printf(TEXT("%s_%d"), *DesiredName, i);
+		TestName = FName(*SuffixedName);
+		if (!WidgetTree->FindWidget(TestName))
+		{
+			UE_LOG(LogUALWidget, Warning, TEXT("Widget name '%s' already exists, renamed to '%s'"),
+				*DesiredName, *SuffixedName);
+			return TestName;
+		}
+	}
+
+	// 极端情况，回退到自动命名
+	UE_LOG(LogUALWidget, Error, TEXT("Failed to generate unique name for '%s' after 999 attempts"), *DesiredName);
+	return NAME_None;
+}
+
+// ============================================================================
 // 命令注册
 // ============================================================================
 
@@ -184,6 +219,15 @@ void FUAL_WidgetCommands::Handle_Create(const TSharedPtr<FJsonObject>& Payload, 
 	if (!Folder.StartsWith(TEXT("/")))
 	{
 		Folder = TEXT("/") + Folder;
+	}
+	
+	// 检查资产是否已存在（防止重名崩溃）
+	FString AssetPath = Folder / Name;
+	if (StaticLoadObject(UObject::StaticClass(), nullptr, *AssetPath))
+	{
+		UAL_CommandUtils::SendError(RequestId, 409,
+			FString::Printf(TEXT("Widget Blueprint already exists: %s"), *AssetPath));
+		return;
 	}
 	
 	// 事务包裹
@@ -324,8 +368,15 @@ void FUAL_WidgetCommands::Handle_AddControl(const TSharedPtr<FJsonObject>& Paylo
 		return;
 	}
 	
+	// 生成唯一名称（防止重名崩溃）
+	FName UniqueName = NAME_None;
+	if (!WidgetName.IsEmpty())
+	{
+		UniqueName = MakeUniqueWidgetName(WidgetTree, WidgetName);
+	}
+	
 	// 创建控件
-	UWidget* NewWidget = WidgetTree->ConstructWidget<UWidget>(WidgetClass);
+	UWidget* NewWidget = WidgetTree->ConstructWidget<UWidget>(WidgetClass, UniqueName);
 	if (!NewWidget)
 	{
 		UAL_CommandUtils::SendError(RequestId, 500, TEXT("Failed to construct widget"));
@@ -334,12 +385,6 @@ void FUAL_WidgetCommands::Handle_AddControl(const TSharedPtr<FJsonObject>& Paylo
 	
 	// 设置设计器标记（避坑1修复）
 	NewWidget->SetDesignerFlags(EWidgetDesignFlags::Designing);
-	
-	// 设置名称
-	if (!WidgetName.IsEmpty())
-	{
-		NewWidget->Rename(*WidgetName);
-	}
 	
 	// 添加到 Canvas
 	UCanvasPanelSlot* Slot = Canvas->AddChildToCanvas(NewWidget);
@@ -558,8 +603,15 @@ void FUAL_WidgetCommands::Handle_AddToVertical(const TSharedPtr<FJsonObject>& Pa
 		return;
 	}
 	
+	// 生成唯一名称（防止重名崩溃）
+	FName UniqueName = NAME_None;
+	if (!WidgetName.IsEmpty())
+	{
+		UniqueName = MakeUniqueWidgetName(WidgetTree, WidgetName);
+	}
+	
 	// 创建控件
-	UWidget* NewWidget = WidgetTree->ConstructWidget<UWidget>(WidgetClass);
+	UWidget* NewWidget = WidgetTree->ConstructWidget<UWidget>(WidgetClass, UniqueName);
 	if (!NewWidget)
 	{
 		UAL_CommandUtils::SendError(RequestId, 500, TEXT("Failed to construct widget"));
@@ -567,11 +619,6 @@ void FUAL_WidgetCommands::Handle_AddToVertical(const TSharedPtr<FJsonObject>& Pa
 	}
 	
 	NewWidget->SetDesignerFlags(EWidgetDesignFlags::Designing);
-	
-	if (!WidgetName.IsEmpty())
-	{
-		NewWidget->Rename(*WidgetName);
-	}
 	
 	// 添加到 VerticalBox
 	UVerticalBoxSlot* Slot = Cast<UVerticalBoxSlot>(VBox->AddChild(NewWidget));
@@ -697,7 +744,14 @@ void FUAL_WidgetCommands::Handle_AddToHorizontal(const TSharedPtr<FJsonObject>& 
 		return;
 	}
 	
-	UWidget* NewWidget = WidgetTree->ConstructWidget<UWidget>(WidgetClass);
+	// 生成唯一名称（防止重名崩溃）
+	FName UniqueName = NAME_None;
+	if (!WidgetName.IsEmpty())
+	{
+		UniqueName = MakeUniqueWidgetName(WidgetTree, WidgetName);
+	}
+	
+	UWidget* NewWidget = WidgetTree->ConstructWidget<UWidget>(WidgetClass, UniqueName);
 	if (!NewWidget)
 	{
 		UAL_CommandUtils::SendError(RequestId, 500, TEXT("Failed to construct widget"));
@@ -705,11 +759,6 @@ void FUAL_WidgetCommands::Handle_AddToHorizontal(const TSharedPtr<FJsonObject>& 
 	}
 	
 	NewWidget->SetDesignerFlags(EWidgetDesignFlags::Designing);
-	
-	if (!WidgetName.IsEmpty())
-	{
-		NewWidget->Rename(*WidgetName);
-	}
 	
 	UHorizontalBoxSlot* Slot = Cast<UHorizontalBoxSlot>(HBox->AddChild(NewWidget));
 	if (!Slot)
@@ -942,7 +991,14 @@ void FUAL_WidgetCommands::Handle_AddChild(const TSharedPtr<FJsonObject>& Payload
 		return;
 	}
 	
-	UWidget* NewWidget = WidgetTree->ConstructWidget<UWidget>(WidgetClass);
+	// 生成唯一名称（防止重名崩溃）
+	FName UniqueName = NAME_None;
+	if (!WidgetName.IsEmpty())
+	{
+		UniqueName = MakeUniqueWidgetName(WidgetTree, WidgetName);
+	}
+	
+	UWidget* NewWidget = WidgetTree->ConstructWidget<UWidget>(WidgetClass, UniqueName);
 	if (!NewWidget)
 	{
 		UAL_CommandUtils::SendError(RequestId, 500, TEXT("Failed to construct widget"));
@@ -950,11 +1006,6 @@ void FUAL_WidgetCommands::Handle_AddChild(const TSharedPtr<FJsonObject>& Payload
 	}
 	
 	NewWidget->SetDesignerFlags(EWidgetDesignFlags::Designing);
-	
-	if (!WidgetName.IsEmpty())
-	{
-		NewWidget->Rename(*WidgetName);
-	}
 	
 	// 根据父容器类型选择添加方式
 	FString SlotType;
@@ -1383,10 +1434,11 @@ void FUAL_WidgetCommands::Handle_MakeVariable(const TSharedPtr<FJsonObject>& Pay
 	// 设置控件为变量
 	Widget->bIsVariable = true;
 	
-	// 重命名控件（变量名）
+	// 重命名控件（变量名）- 使用安全重命名防止重名崩溃
 	if (VariableName != WidgetName)
 	{
-		Widget->Rename(*VariableName);
+		FName SafeName = GenerateUniqueWidgetName(WidgetBP->WidgetTree, VariableName);
+		Widget->Rename(*SafeName.ToString());
 	}
 	
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
@@ -1987,4 +2039,38 @@ FVector2D FUAL_WidgetCommands::ParseVector2D(const TSharedPtr<FJsonObject>& Obj)
 	}
 	
 	return FVector2D(X, Y);
+}
+
+// ============================================================================
+// 辅助函数: 唯一名称生成（防止重名崩溃）
+// ============================================================================
+
+FName FUAL_WidgetCommands::GenerateUniqueWidgetName(UWidgetTree* WidgetTree, const FString& DesiredName)
+{
+	if (!WidgetTree || DesiredName.IsEmpty())
+	{
+		return NAME_None;
+	}
+	
+	// 先检查期望名称是否可用
+	if (!WidgetTree->FindWidget(FName(*DesiredName)))
+	{
+		return FName(*DesiredName);
+	}
+	
+	// 名称已存在，追加后缀递增
+	UE_LOG(LogUALWidget, Warning, TEXT("Widget name '%s' already exists, generating unique name"), *DesiredName);
+	
+	for (int32 i = 1; i < 1000; i++)
+	{
+		FString Candidate = FString::Printf(TEXT("%s_%d"), *DesiredName, i);
+		if (!WidgetTree->FindWidget(FName(*Candidate)))
+		{
+			UE_LOG(LogUALWidget, Log, TEXT("Using unique name: %s"), *Candidate);
+			return FName(*Candidate);
+		}
+	}
+	
+	// 极端情况 fallback：使用 MakeUniqueObjectName
+	return MakeUniqueObjectName(WidgetTree, UWidget::StaticClass(), FName(*DesiredName));
 }

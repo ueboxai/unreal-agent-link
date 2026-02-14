@@ -1,4 +1,4 @@
-#include "UAL_ContentBrowserCommands.h"
+﻿#include "UAL_ContentBrowserCommands.h"
 #include "UAL_CommandUtils.h"
 #include "Utils/UAL_PBRMaterialHelper.h"
 #include "Utils/UAL_NormalizedImporter.h"
@@ -397,6 +397,21 @@ void FUAL_ContentBrowserCommands::Handle_ImportAssets(
 	bool bOverwrite = false;
 	Payload->TryGetBoolField(TEXT("overwrite"), bOverwrite);
 	
+	// 缩放参数：用于补偿不同格式的单位差异
+	// OBJ/GLB/glTF 在 UE 5.5+（Interchange）默认 100.0（源文件单位为米，UE 使用厘米）
+	// UE 5.0-5.4 使用传统导入器，不需要缩放补偿
+	// FBX 默认 1.0（FBX 内含单位元数据，引擎自动处理）
+	// 可通过 JSON 显式指定覆盖默认值
+	double ScaleOverride = -1.0; // -1 表示使用格式默认值
+	Payload->TryGetNumberField(TEXT("scale"), ScaleOverride);
+	
+	// 验证 scale 参数：必须 > 0 或为 -1（自动）
+	if (ScaleOverride != -1.0 && ScaleOverride <= 0.0)
+	{
+		UE_LOG(LogUALContentCmd, Warning, TEXT("Invalid scale value %.4f, must be > 0. Using format default."), ScaleOverride);
+		ScaleOverride = -1.0;
+	}
+	
 	// 解析 normalized_names 数组，建立文件名到规范化名称的映射
 	// 格式: [{ "original": "原始文件名.ext", "normalized": "规范化名称" }, ...]
 	TMap<FString, FString> NormalizedNameMap;
@@ -609,22 +624,43 @@ void FUAL_ContentBrowserCommands::Handle_ImportAssets(
 					
 					if (NormalizedName && !NormalizedName->IsEmpty() && *NormalizedName != ImportedAsset->GetName())
 					{
-						UE_LOG(LogUALContentCmd, Log, TEXT("Renaming asset: %s -> %s"), 
-							*ImportedAsset->GetName(), **NormalizedName);
-						
 						// 获取资产所在的包路径
 						FString PackagePath = FPackageName::GetLongPackagePath(ImportedAsset->GetOutermost()->GetName());
 						
-						// 使用 AssetTools 重命名资产
-						FAssetToolsModule& AssetToolsMod = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
-						IAssetTools& AssetToolsRef = AssetToolsMod.Get();
+						// 冲突检测：检查目标名称是否已存在（内存中或磁盘上）
+						FString TargetPackagePath = PackagePath / *NormalizedName;
+						bool bTargetExists = false;
 						
-						TArray<FAssetRenameData> RenameData;
-// 使用 TWeakObjectPtr<UObject> 构造函数，兼容所有 UE5 版本
-						RenameData.Add(FAssetRenameData(ImportedAsset, PackagePath, *NormalizedName));
+						// 优先用 AssetRegistry 检查（能发现磁盘上未加载的资产）
+						FAssetRegistryModule& ARModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+						TArray<FAssetData> ExistingAssets;
+						ARModule.Get().GetAssetsByPackageName(FName(*TargetPackagePath), ExistingAssets);
+						bTargetExists = ExistingAssets.Num() > 0;
 						
-						if (RenameData.Num() > 0)
+						// 回退：也检查内存中刚创建但未注册的对象
+						if (!bTargetExists)
 						{
+							FString TargetObjectPath = TargetPackagePath + TEXT(".") + *NormalizedName;
+							bTargetExists = StaticFindObject(UObject::StaticClass(), nullptr, *TargetObjectPath) != nullptr;
+						}
+						
+						if (bTargetExists)
+						{
+							UE_LOG(LogUALContentCmd, Log, TEXT("Skipping rename: target already exists: %s"), *TargetPackagePath);
+						}
+						else
+						{
+							UE_LOG(LogUALContentCmd, Log, TEXT("Renaming asset: %s -> %s"), 
+								*ImportedAsset->GetName(), **NormalizedName);
+							
+							// 使用 AssetTools 重命名资产
+							FAssetToolsModule& AssetToolsMod = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
+							IAssetTools& AssetToolsRef = AssetToolsMod.Get();
+							
+							TArray<FAssetRenameData> RenameData;
+							// 使用 TWeakObjectPtr<UObject> 构造函数，兼容所有 UE5 版本
+							RenameData.Add(FAssetRenameData(ImportedAsset, PackagePath, *NormalizedName));
+							
 							bool bRenameSuccess = AssetToolsRef.RenameAssets(RenameData);
 							if (bRenameSuccess)
 							{
@@ -655,6 +691,47 @@ void FUAL_ContentBrowserCommands::Handle_ImportAssets(
 					else if (UStaticMesh* Mesh = Cast<UStaticMesh>(ImportedAsset))
 					{
 						ImportedMeshes.Add(Mesh);
+						
+						// 缩放补偿：OBJ/GLB/glTF 在 Interchange（UE 5.5+）下不做单位转换
+						// 导致以米为单位的模型在 UE（厘米）中缩小 100 倍
+						// UE 5.0-5.4 使用传统导入器，不需要补偿
+						FString SourceExt = FPaths::GetExtension(Task->Filename).ToLower();
+						double MeshScale = ScaleOverride;
+						if (MeshScale < 0) // 未显式指定，使用格式默认值
+						{
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 5
+							// UE 5.5+ 使用 Interchange 导入 OBJ/GLB/glTF，不做单位转换
+							if (SourceExt == TEXT("obj") || SourceExt == TEXT("glb") || SourceExt == TEXT("gltf"))
+							{
+								MeshScale = 100.0;
+							}
+							else
+							{
+								MeshScale = 1.0;
+							}
+#else
+							// UE 5.0-5.4 使用传统导入器，不需要缩放补偿
+							MeshScale = 1.0;
+#endif
+						}
+						
+						if (!FMath::IsNearlyEqual(MeshScale, 1.0))
+						{
+							if (Mesh->GetNumSourceModels() > 0)
+							{
+								// 对所有 LOD 应用缩放，避免 LOD 间尺寸不一致
+								for (int32 LODIdx = 0; LODIdx < Mesh->GetNumSourceModels(); ++LODIdx)
+								{
+									FStaticMeshSourceModel& SourceModel = Mesh->GetSourceModel(LODIdx);
+									SourceModel.BuildSettings.BuildScale3D = FVector(MeshScale);
+								}
+								Mesh->Build();
+								Mesh->MarkPackageDirty();
+								
+								UE_LOG(LogUALContentCmd, Log, TEXT("Applied scale %.1f to mesh: %s (%d LODs, format: %s)"),
+									MeshScale, *Mesh->GetName(), Mesh->GetNumSourceModels(), *SourceExt);
+							}
+						}
 					}
 				}
 			}

@@ -14,6 +14,7 @@
 #include "UAL_ContentBrowserExt.h"
 #include "UAL_LevelViewportExt.h"
 #include "Async/Async.h"
+#include "Containers/Ticker.h"
 #include "Serialization/JsonWriter.h"
 #include "Serialization/JsonSerializer.h"
 
@@ -163,44 +164,56 @@ void FUnrealAgentLinkModule::RegisterMenus()
 
 void FUnrealAgentLinkModule::HandleSocketMessage(const FString& Data)
 {
-	// 将 Socket 线程收到的数据切回 GameThread
-	AsyncTask(ENamedThreads::GameThread, [this, Data]()
-	{
-		if (CommandHandler)
+	// UE 5.3+ 修复：使用 Ticker 而不是 AsyncTask 调度到 GameThread
+	// AsyncTask(GameThread) 虽然在 GameThread 上执行，但仍处于 TaskGraph 调度上下文中
+	// 当后续代码触发 Interchange 导入时，Interchange 内部也使用 TaskGraph，
+	// 导致 TaskGraph 递归保护断言崩溃：++Queue(QueueIndex).RecursionGuard == 1
+	// 使用 Ticker 确保代码在正常的 Tick 上下文中执行，完全脱离 TaskGraph
+	FTSTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateLambda([this, Data](float DeltaTime) -> bool
 		{
-			CommandHandler->ProcessMessage(Data);
-		}
-	});
+			if (CommandHandler)
+			{
+				CommandHandler->ProcessMessage(Data);
+			}
+			return false; // 只执行一次
+		}),
+		0.0f // 下一个 Tick 立即执行
+	);
 }
 
 void FUnrealAgentLinkModule::HandleSocketConnected()
 {
-	// 将回调切回 GameThread 构建数据并发送
-	AsyncTask(ENamedThreads::GameThread, [this]()
-	{
-		if (!CommandHandler)
+	// 同样使用 Ticker 切回 GameThread，保持一致性
+	FTSTicker::GetCoreTicker().AddTicker(
+		FTickerDelegate::CreateLambda([this](float DeltaTime) -> bool
 		{
-			return;
-		}
+			if (!CommandHandler)
+			{
+				return false;
+			}
 
-		const TSharedPtr<FJsonObject> Payload = CommandHandler->BuildProjectInfo();
-		if (!Payload.IsValid())
-		{
-			return;
-		}
+			const TSharedPtr<FJsonObject> Payload = CommandHandler->BuildProjectInfo();
+			if (!Payload.IsValid())
+			{
+				return false;
+			}
 
-		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
-		Root->SetStringField(TEXT("ver"), TEXT("1.0"));
-		Root->SetStringField(TEXT("type"), TEXT("evt"));
-		Root->SetStringField(TEXT("method"), TEXT("project.info"));
-		Root->SetObjectField(TEXT("payload"), Payload);
+			TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+			Root->SetStringField(TEXT("ver"), TEXT("1.0"));
+			Root->SetStringField(TEXT("type"), TEXT("evt"));
+			Root->SetStringField(TEXT("method"), TEXT("project.info"));
+			Root->SetObjectField(TEXT("payload"), Payload);
 
-		FString OutJson;
-		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutJson);
-		FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
+			FString OutJson;
+			const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutJson);
+			FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
 
-		FUAL_NetworkManager::Get().SendMessage(OutJson);
-	});
+			FUAL_NetworkManager::Get().SendMessage(OutJson);
+			return false; // 只执行一次
+		}),
+		0.0f
+	);
 }
 
 #undef LOCTEXT_NAMESPACE

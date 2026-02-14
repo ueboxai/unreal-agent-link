@@ -228,4 +228,10 @@ private:
 	 * 解析 Vector2D 从 JSON 对象
 	 */
 	static FVector2D ParseVector2D(const TSharedPtr<FJsonObject>& Obj);
+	
+	/**
+	 * 在 WidgetTree 中生成唯一名称（防止重名崩溃）
+	 * 如果 DesiredName 已存在，自动追加 _1, _2, ... 后缀
+	 */
+	static FName GenerateUniqueWidgetName(class UWidgetTree* WidgetTree, const FString& DesiredName);
 };
