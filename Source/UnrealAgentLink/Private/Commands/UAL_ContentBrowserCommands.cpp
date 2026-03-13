@@ -229,8 +229,9 @@ void FUAL_ContentBrowserCommands::RegisterCommands(
 	CommandMap.Add(TEXT("content.describe"), &Handle_DescribeAsset);
 	CommandMap.Add(TEXT("content.normalized_import"), &Handle_NormalizedImport);
 	CommandMap.Add(TEXT("content.audit_optimization"), &Handle_AuditOptimization);
+	CommandMap.Add(TEXT("content.rescan"), &Handle_RescanAssets);
 	
-	UE_LOG(LogUALContentCmd, Log, TEXT("ContentBrowser commands registered: content.search, content.import, content.move, content.delete, content.describe, content.normalized_import, content.audit_optimization"));
+	UE_LOG(LogUALContentCmd, Log, TEXT("ContentBrowser commands registered: content.search, content.import, content.move, content.delete, content.describe, content.normalized_import, content.audit_optimization, content.rescan"));
 }
 
 // ============================================================================
@@ -1798,4 +1799,90 @@ void FUAL_ContentBrowserCommands::Handle_AuditOptimization(const TSharedPtr<FJso
 	}
 
 	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
+}
+
+/**
+ * content.rescan - 强制重新扫描资产
+ * 批量复制 .uasset 文件到 Content 目录后调用此命令，
+ * 让 AssetRegistry 重新读取文件头并注册依赖关系，
+ * 修复 DirectoryWatcher 竞态导致的材质引用丢失
+ *
+ * 参数:
+ *   - paths: /Game/... 路径数组
+ * 返回:
+ *   - ok: true
+ *   - scanned: 成功扫描的文件数
+ */
+void FUAL_ContentBrowserCommands::Handle_RescanAssets(
+	const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+	// 解析 paths 数组
+	const TArray<TSharedPtr<FJsonValue>>* PathsArray = nullptr;
+	if (!Payload->TryGetArrayField(TEXT("paths"), PathsArray) || !PathsArray || PathsArray->Num() == 0)
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing or empty 'paths' array"));
+		return;
+	}
+
+	// 将 /Game/... 路径转换为磁盘上的 .uasset 文件路径
+	TArray<FString> FilePaths;
+	FilePaths.Reserve(PathsArray->Num());
+
+	for (const TSharedPtr<FJsonValue>& PathValue : *PathsArray)
+	{
+		FString GamePath;
+		if (!PathValue->TryGetString(GamePath) || GamePath.IsEmpty())
+		{
+			continue;
+		}
+
+		// 转换为磁盘路径: /Game/Foo/Bar -> {ProjectContentDir}/Foo/Bar.uasset
+		FString DiskPath;
+		if (FPackageName::TryConvertLongPackageNameToFilename(GamePath, DiskPath, FPackageName::GetAssetPackageExtension()))
+		{
+			// 确保文件确实存在于磁盘上
+			if (FPaths::FileExists(DiskPath))
+			{
+				FilePaths.Add(DiskPath);
+			}
+			else
+			{
+				// 也尝试 .umap 扩展名
+				FString UmapPath;
+				if (FPackageName::TryConvertLongPackageNameToFilename(GamePath, UmapPath, TEXT(".umap")))
+				{
+					if (FPaths::FileExists(UmapPath))
+					{
+						FilePaths.Add(UmapPath);
+					}
+				}
+			}
+		}
+	}
+
+	if (FilePaths.Num() == 0)
+	{
+		// 没有找到任何有效文件，但不算错误
+		TSharedPtr<FJsonObject> Response = MakeShared<FJsonObject>();
+		Response->SetBoolField(TEXT("ok"), true);
+		Response->SetNumberField(TEXT("scanned"), 0);
+		Response->SetStringField(TEXT("message"), TEXT("No matching files found on disk"));
+		UAL_CommandUtils::SendResponse(RequestId, 200, Response);
+		return;
+	}
+
+	UE_LOG(LogUALContentCmd, Log, TEXT("content.rescan: Scanning %d files into AssetRegistry..."), FilePaths.Num());
+
+	// 同步扫描 AssetRegistry
+	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+	AssetRegistry.ScanFilesSynchronous(FilePaths);
+
+	UE_LOG(LogUALContentCmd, Log, TEXT("content.rescan: Done. Scanned %d files."), FilePaths.Num());
+
+	// 返回结果
+	TSharedPtr<FJsonObject> Response = MakeShared<FJsonObject>();
+	Response->SetBoolField(TEXT("ok"), true);
+	Response->SetNumberField(TEXT("scanned"), FilePaths.Num());
+	UAL_CommandUtils::SendResponse(RequestId, 200, Response);
 }

@@ -186,16 +186,18 @@ namespace UALViewportUtils
 
 		if (PngData.Num() > 0)
 		{
-			FString TempDir = FPaths::ProjectSavedDir() / TEXT("UALinkThumbnails");
+			// 使用绝对路径，确保 Box 应用能正确访问
+			FString TempDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("UALinkThumbnails"));
 			IFileManager::Get().MakeDirectory(*TempDir, true);
 			
-			FString SafeName = AssetData.AssetName.ToString();
-			SafeName = SafeName.Replace(TEXT(" "), TEXT("_"));
-			FString FilePath = TempDir / FString::Printf(TEXT("%s_%lld.png"), *SafeName, FDateTime::Now().GetTicks());
+			// 🔧 使用包名哈希生成安全的 ASCII 文件名，避免中文字符在 JSON 传输中编码损坏
+			FString SafeName = FString::Printf(TEXT("thumb_%08X_%lld"),
+				GetTypeHash(AssetData.PackageName), FDateTime::Now().GetTicks());
+			FString FilePath = TempDir / FString::Printf(TEXT("%s.png"), *SafeName);
 			
 			if (FFileHelper::SaveArrayToFile(PngData, *FilePath))
 			{
-				UE_LOG(LogUALViewport, Log, TEXT("缩略图已保存: %s"), *FilePath);
+				UE_LOG(LogUALViewport, Log, TEXT("缩略图已保存: %s (资产: %s)"), *FilePath, *AssetData.AssetName.ToString());
 				return FilePath;
 			}
 		}

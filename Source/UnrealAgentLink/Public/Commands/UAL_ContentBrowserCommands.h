@@ -102,4 +102,15 @@ public:
 	 * @param RequestId 请求 ID
 	 */
 	static void Handle_AuditOptimization(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+	
+	/**
+	 * content.rescan - 强制重新扫描资产
+	 * 将指定路径的资产重新注册到 AssetRegistry
+	 * 用于批量复制 .uasset 文件后修复 DirectoryWatcher 竞态导致的依赖丢失
+	 * 
+	 * @param Payload 请求参数:
+	 *   - paths: /Game/... 路径数组，要重新扫描的资产
+	 * @param RequestId 请求 ID
+	 */
+	static void Handle_RescanAssets(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 };

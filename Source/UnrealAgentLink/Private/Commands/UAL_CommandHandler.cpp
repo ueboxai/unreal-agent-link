@@ -10,6 +10,7 @@
 #include "UAL_MaterialCommands.h"
 #include "UAL_MessageLogCommands.h"
 #include "UAL_WidgetCommands.h"
+#include "UAL_NiagaraCommands.h"
 
 
 #include "Async/Async.h"
@@ -125,6 +126,7 @@ void FUAL_CommandHandler::RegisterCommands()
 	FUAL_MaterialCommands::RegisterCommands(CommandMap);
 	FUAL_MessageLogCommands::RegisterCommands(CommandMap);
 	FUAL_WidgetCommands::RegisterCommands(CommandMap);
+	FUAL_NiagaraCommands::RegisterCommands(CommandMap);
 
 }
 

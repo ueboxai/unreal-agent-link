@@ -89,7 +89,9 @@ public class UnrealAgentLink : ModuleRules
 				"UMGEditor", // Added for UWidgetBlueprint support
 				"LevelEditor", // Added for SLevelViewport and FLevelEditorViewportClient
 				"EngineSettings", // Added for UGameMapsSettings
-				"MessageLog" // Added for FMessageLogModule (MessageLog commands)
+				"MessageLog", // Added for FMessageLogModule (MessageLog commands)
+				"Niagara", // Added for UNiagaraSystem, UNiagaraComponent, UNiagaraFunctionLibrary
+				"NiagaraEditor" // Added for UNiagaraSystemFactoryNew::InitializeSystem (NIAGARAEDITOR_API)
 			}
 			);
 

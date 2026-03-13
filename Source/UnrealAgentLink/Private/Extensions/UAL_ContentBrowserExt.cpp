@@ -54,68 +54,74 @@ namespace
 	 * @param ThumbnailSize 缩略图大小（默认 128x128）
 	 * @return PNG 文件的完整路径，失败返回空字符串
 	 */
-	FString SaveAssetThumbnailToFile(const FAssetData& AssetData, int32 ThumbnailSize = 128)
+	FString SaveAssetThumbnailToFile(const FAssetData& AssetData, int32 ThumbnailSize = 256)
 	{
 		// 🚫 过滤掉蓝图 (Blueprint)，因为它们通常没有可视内容导致缩略图全黑
 		// 用户更希望显示默认的占位图标
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+		if (AssetData.AssetClassPath.GetAssetName() == FName("Blueprint"))
+#else
 		if (AssetData.AssetClass == FName("Blueprint"))
+#endif
 		{
 			return FString();
 		}
 
-		// 尝试从包中获取已有的缩略图
 		FName PackageName = AssetData.PackageName;
 		FString PackageString = PackageName.ToString();
 		
-		// 首先尝试获取已缓存的缩略图
-		const FObjectThumbnail* ExistingThumbnail = ThumbnailTools::FindCachedThumbnail(PackageString);
+		const FObjectThumbnail* ThumbnailToUse = nullptr;
 		
-		// 如果没有缓存的缩略图，尝试渲染
-		FObjectThumbnail RenderedThumbnail;
-		const FObjectThumbnail* ThumbnailToUse = ExistingThumbnail;
-		
-		if (ExistingThumbnail)
+		// === 策略 1（最优先）: 从 .uasset 包文件中读取嵌入式缩略图 ===
+		// 这与拖入导入时 App 侧二进制解析读取的是同一份数据，质量最高最可靠
+		FObjectThumbnail PackageThumbnail;
+		if (ThumbnailTools::LoadThumbnailFromPackage(AssetData, PackageThumbnail))
 		{
-			// 检查缓存缩略图的尺寸
-			if (ExistingThumbnail->GetImageWidth() < ThumbnailSize || ExistingThumbnail->GetImageHeight() < ThumbnailSize)
+			if (PackageThumbnail.GetImageWidth() > 0 && PackageThumbnail.GetImageHeight() > 0)
 			{
-				UE_LOG(LogUALContentBrowser, Log, TEXT("缓存缩略图尺寸(%dx%d)小于请求尺寸(%d)，将强制重新渲染: %s"), 
-					ExistingThumbnail->GetImageWidth(), ExistingThumbnail->GetImageHeight(), ThumbnailSize, *PackageString);
-				// 忽略过小的缓存
-				ThumbnailToUse = nullptr;
-			}
-			else
-			{
-				// UE_LOG(LogUALContentBrowser, Log, TEXT("使用缓存缩略图: %s"), *PackageString);
+				ThumbnailToUse = &PackageThumbnail;
+				UE_LOG(LogUALContentBrowser, Log, TEXT("✅ 从包文件加载嵌入式缩略图: %s (%dx%d)"), 
+					*PackageString, PackageThumbnail.GetImageWidth(), PackageThumbnail.GetImageHeight());
 			}
 		}
 		
-		if (!ThumbnailToUse || ThumbnailToUse->GetImageWidth() == 0)
+		// === 策略 2: 从内存缓存获取 ===
+		if (!ThumbnailToUse)
 		{
-			// UE_LOG(LogUALContentBrowser, Log, TEXT("未找到有效缓存，尝试渲染缩略图: %s"), *PackageString);
-			// 加载资产对象
-			UObject* Asset = AssetData.GetAsset();
-			if (!Asset)
+			const FObjectThumbnail* CachedThumbnail = ThumbnailTools::FindCachedThumbnail(PackageString);
+			if (CachedThumbnail && CachedThumbnail->GetImageWidth() > 0 && CachedThumbnail->GetImageHeight() > 0)
 			{
-				return FString();
+				ThumbnailToUse = CachedThumbnail;
 			}
-			
-			// 渲染缩略图
-			ThumbnailTools::RenderThumbnail(
-				Asset, 
-				ThumbnailSize, 
-				ThumbnailSize, 
-				ThumbnailTools::EThumbnailTextureFlushMode::NeverFlush, 
-				nullptr, 
-				&RenderedThumbnail
-			);
-			
-			ThumbnailToUse = &RenderedThumbnail;
+		}
+		
+		// === 策略 3（末选）: 运行时渲染缩略图 ===
+		// 注意：RenderThumbnail 可能产生全黑图像，仅作为最后手段
+		FObjectThumbnail RenderedThumbnail;
+		if (!ThumbnailToUse)
+		{
+			UObject* Asset = AssetData.GetAsset();
+			if (Asset)
+			{
+				ThumbnailTools::RenderThumbnail(
+					Asset, 
+					ThumbnailSize, 
+					ThumbnailSize, 
+					ThumbnailTools::EThumbnailTextureFlushMode::NeverFlush, 
+					nullptr, 
+					&RenderedThumbnail
+				);
+				
+				if (RenderedThumbnail.GetImageWidth() > 0 && RenderedThumbnail.GetImageHeight() > 0)
+				{
+					ThumbnailToUse = &RenderedThumbnail;
+				}
+			}
 		}
 		
 		if (!ThumbnailToUse || ThumbnailToUse->GetImageWidth() == 0 || ThumbnailToUse->GetImageHeight() == 0)
 		{
-			UE_LOG(LogUALContentBrowser, Warning, TEXT("无法生成有效缩略图: %s"), *PackageString);
+			UE_LOG(LogUALContentBrowser, Warning, TEXT("所有缩略图获取策略均失败: %s"), *PackageString);
 			return FString();
 		}
 		
@@ -183,19 +189,19 @@ namespace
 
 		if (PngData.Num() > 0)
 		{
-			// 保存到临时目录
-			FString TempDir = FPaths::ProjectSavedDir() / TEXT("UALinkThumbnails");
+			// 保存到临时目录（使用绝对路径，确保 Box 应用能正确访问）
+			FString TempDir = FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("UALinkThumbnails"));
 			IFileManager::Get().MakeDirectory(*TempDir, true);
 			
-			// 使用资产名称作为文件名
-			FString SafeName = AssetData.AssetName.ToString();
-			SafeName = SafeName.Replace(TEXT(" "), TEXT("_"));
-			FString FilePath = TempDir / FString::Printf(TEXT("%s_%lld.png"), *SafeName, FDateTime::Now().GetTicks());
+			// 🔧 使用包名哈希生成安全的 ASCII 文件名，避免中文字符在 JSON 传输中编码损坏
+			FString SafeName = FString::Printf(TEXT("thumb_%08X_%lld"),
+				GetTypeHash(AssetData.PackageName), FDateTime::Now().GetTicks());
+			FString FilePath = TempDir / FString::Printf(TEXT("%s.png"), *SafeName);
 			
 			// 写入文件
 			if (FFileHelper::SaveArrayToFile(PngData, *FilePath))
 			{
-				UE_LOG(LogUALContentBrowser, Log, TEXT("✅ 缩略图已保存: %s"), *FilePath);
+				UE_LOG(LogUALContentBrowser, Log, TEXT("✅ 缩略图已保存: %s (资产: %s)"), *FilePath, *AssetData.AssetName.ToString());
 				return FilePath;
 			}
 		}
