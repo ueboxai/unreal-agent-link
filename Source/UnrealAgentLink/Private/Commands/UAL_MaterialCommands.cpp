@@ -712,12 +712,92 @@ void FUAL_MaterialCommands::Handle_GetMaterialGraph(
 	MaterialPins.Add(MakeShared<FJsonValueString>(TEXT("AmbientOcclusion")));
 	Data->SetArrayField(TEXT("material_pins"), MaterialPins);
 
-	// 7. 连接数量（简化版本，后续可扩展）
-	Data->SetNumberField(TEXT("connection_count"), 0);
+	// 7. Collect connections from expression inputs and material main node
+	auto AddConn = [&](const FString& FromId, const FString& FromPin,
+					   const FString& ToId, const FString& ToPin)
+	{
+		TSharedPtr<FJsonObject> C = MakeShared<FJsonObject>();
+		C->SetStringField(TEXT("from_node"), FromId);
+		C->SetStringField(TEXT("from_pin"), FromPin);
+		C->SetStringField(TEXT("to_node"), ToId);
+		C->SetStringField(TEXT("to_pin"), ToPin);
+		ConnectionsJson.Add(MakeShared<FJsonValueObject>(C));
+	};
+
+	// 7a. Node-to-node connections
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+	for (UMaterialExpression* Expr : Material->GetExpressions())
+#else
+	for (UMaterialExpression* Expr : Material->Expressions)
+#endif
+	{
+		if (!Expr) continue;
+		const FString* ToId = ExpressionToId.Find(Expr);
+		if (!ToId) continue;
+
+		const TArray<FExpressionInput*> Inputs = Expr->GetInputs();
+		for (int32 i = 0; i < Inputs.Num(); ++i)
+		{
+			FExpressionInput* In = Inputs[i];
+			if (!In || !In->Expression) continue;
+			const FString* FromId = ExpressionToId.Find(In->Expression);
+			if (!FromId) continue;
+
+			FString InName = Expr->GetInputName(i).ToString();
+			if (InName.IsEmpty()) InName = FString::Printf(TEXT("Input_%d"), i);
+			AddConn(*FromId, FString::Printf(TEXT("Output_%d"), In->OutputIndex), *ToId, InName);
+		}
+	}
+
+	// 7b. Material main node connections
+	struct FMatPin { const TCHAR* Name; FExpressionInput* In; };
+#if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
+	auto* ED = Material->GetEditorOnlyData();
+	FMatPin MatPins[] = {
+		{TEXT("BaseColor"),           &ED->BaseColor},
+		{TEXT("Metallic"),            &ED->Metallic},
+		{TEXT("Specular"),            &ED->Specular},
+		{TEXT("Roughness"),           &ED->Roughness},
+		{TEXT("EmissiveColor"),       &ED->EmissiveColor},
+		{TEXT("Opacity"),             &ED->Opacity},
+		{TEXT("OpacityMask"),         &ED->OpacityMask},
+		{TEXT("Normal"),              &ED->Normal},
+		{TEXT("WorldPositionOffset"), &ED->WorldPositionOffset},
+		{TEXT("SubsurfaceColor"),     &ED->SubsurfaceColor},
+		{TEXT("AmbientOcclusion"),    &ED->AmbientOcclusion},
+	};
+#else
+	FMatPin MatPins[] = {
+		{TEXT("BaseColor"),           &Material->BaseColor},
+		{TEXT("Metallic"),            &Material->Metallic},
+		{TEXT("Specular"),            &Material->Specular},
+		{TEXT("Roughness"),           &Material->Roughness},
+		{TEXT("EmissiveColor"),       &Material->EmissiveColor},
+		{TEXT("Opacity"),             &Material->Opacity},
+		{TEXT("OpacityMask"),         &Material->OpacityMask},
+		{TEXT("Normal"),              &Material->Normal},
+		{TEXT("WorldPositionOffset"), &Material->WorldPositionOffset},
+		{TEXT("SubsurfaceColor"),     &Material->SubsurfaceColor},
+		{TEXT("AmbientOcclusion"),    &Material->AmbientOcclusion},
+	};
+#endif
+	for (const FMatPin& MP : MatPins)
+	{
+		if (MP.In && MP.In->Expression)
+		{
+			const FString* FromId = ExpressionToId.Find(MP.In->Expression);
+			if (FromId)
+			{
+				AddConn(*FromId, FString::Printf(TEXT("Output_%d"), MP.In->OutputIndex), TEXT("Material"), MP.Name);
+			}
+		}
+	}
+
+	Data->SetNumberField(TEXT("connection_count"), ConnectionsJson.Num());
 	Data->SetArrayField(TEXT("connections"), ConnectionsJson);
 
-	UE_LOG(LogUALMaterial, Log, TEXT("Got material graph: %s with %d nodes"), 
-		*Material->GetName(), NodesJson.Num());
+	UE_LOG(LogUALMaterial, Log, TEXT("Got material graph: %s (%d nodes, %d connections)"),
+		*Material->GetName(), NodesJson.Num(), ConnectionsJson.Num());
 
 	UAL_CommandUtils::SendResponse(RequestId, 200, Data);
 }

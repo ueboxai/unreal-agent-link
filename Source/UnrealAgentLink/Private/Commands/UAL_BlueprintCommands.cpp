@@ -1742,11 +1742,36 @@ void FUAL_BlueprintCommands::Handle_GetBlueprintGraph(const TSharedPtr<FJsonObje
 		}
 	}
 
+	// Collect top-level connections summary (output pins only to avoid duplicates)
+	TArray<TSharedPtr<FJsonValue>> ConnectionsJson;
+	for (UEdGraphNode* N : Graph->Nodes)
+	{
+		if (!N) continue;
+		for (UEdGraphPin* P : N->Pins)
+		{
+			if (!P || P->Direction != EGPD_Output) continue;
+			for (UEdGraphPin* LP : P->LinkedTo)
+			{
+				if (!LP) continue;
+				UEdGraphNode* TN = LP->GetOwningNode();
+				if (!TN) continue;
+				TSharedPtr<FJsonObject> CO = MakeShared<FJsonObject>();
+				CO->SetStringField(TEXT("from_node"), UAL_GuidToString(N->NodeGuid));
+				CO->SetStringField(TEXT("from_pin"), P->PinName.ToString());
+				CO->SetStringField(TEXT("to_node"), UAL_GuidToString(TN->NodeGuid));
+				CO->SetStringField(TEXT("to_pin"), LP->PinName.ToString());
+				ConnectionsJson.Add(MakeShared<FJsonValueObject>(CO));
+			}
+		}
+	}
+
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetBoolField(TEXT("ok"), true);
 	Result->SetStringField(TEXT("blueprint_path"), Blueprint->GetPathName());
 	Result->SetStringField(TEXT("graph_name"), Graph->GetName());
 	Result->SetArrayField(TEXT("nodes"), Nodes);
+	Result->SetNumberField(TEXT("connection_count"), ConnectionsJson.Num());
+	Result->SetArrayField(TEXT("connections"), ConnectionsJson);
 	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
 }
 
