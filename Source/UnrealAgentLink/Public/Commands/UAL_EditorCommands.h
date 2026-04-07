@@ -40,6 +40,18 @@ public:
 	// editor.get_focus_context - 获取当前焦点编辑器上下文（正在编辑的蓝图/材质/关卡等）
 	static void Handle_GetFocusContext(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 
+	// editor.open_asset - Open an asset and sync it in the Content Browser.
+	static void Handle_OpenAsset(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
+	// editor.open_blueprint - Open a Blueprint asset and sync it in the Content Browser.
+	static void Handle_OpenBlueprint(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
+	// editor.open_level - Load a level by package path.
+	static void Handle_OpenLevel(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
+	// editor.reveal_path - Reveal an asset path in the Content Browser or a disk path in Explorer/Finder.
+	static void Handle_RevealPath(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
 	// 构建项目信息（公开给外部使用）
 public:
 	static TSharedPtr<FJsonObject> BuildProjectInfo();

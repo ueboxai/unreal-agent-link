@@ -27,10 +27,16 @@
 #include "Slate/WidgetRenderer.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Kismet/KismetRenderingLibrary.h"
+#include "EditorAssetLibrary.h"
+#include "FileHelpers.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "Engine/Blueprint.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInstance.h"
+#include "AssetRegistry/AssetData.h"
+#include "IContentBrowserSingleton.h"
+#include "ContentBrowserModule.h"
+#include "HAL/PlatformProcess.h"
 
 #if PLATFORM_WINDOWS
 #include "Windows/AllowWindowsPlatformTypes.h"
@@ -58,6 +64,76 @@ struct FScreenshotTaskContext
 
 // 静态任务列表（存储正在进行的截图任务）
 static TMap<FString, TSharedPtr<FScreenshotTaskContext>> PendingScreenshotTasks;
+
+static bool UAL_IsAssetPath(const FString& Path)
+{
+	return Path.StartsWith(TEXT("/Game/")) || Path.StartsWith(TEXT("/Engine/"));
+}
+
+static UObject* UAL_LoadAssetForEditor(const FString& AssetPath)
+{
+	if (!UAL_IsAssetPath(AssetPath))
+	{
+		return nullptr;
+	}
+
+	return UEditorAssetLibrary::LoadAsset(AssetPath);
+}
+
+static void UAL_SyncBrowserToAsset(const FString& AssetPath)
+{
+	if (!UAL_IsAssetPath(AssetPath))
+	{
+		return;
+	}
+
+	UObject* Asset = UAL_LoadAssetForEditor(AssetPath);
+	if (!Asset)
+	{
+		return;
+	}
+
+	FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
+	TArray<FAssetData> AssetsToSync;
+	AssetsToSync.Add(FAssetData(Asset));
+	ContentBrowserModule.Get().SyncBrowserToAssets(AssetsToSync);
+}
+
+static void UAL_SyncBrowserToFolder(const FString& FolderPath)
+{
+	if (!UAL_IsAssetPath(FolderPath))
+	{
+		return;
+	}
+
+	FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
+	TArray<FString> FoldersToSync;
+	FoldersToSync.Add(FolderPath);
+	ContentBrowserModule.Get().SyncBrowserToFolders(FoldersToSync);
+}
+
+static TSharedPtr<FJsonObject> UAL_BuildEditorActionData(const FString& TargetPath)
+{
+	TSharedPtr<FJsonObject> Data = MakeShared<FJsonObject>();
+	Data->SetStringField(TEXT("path"), TargetPath);
+	Data->SetBoolField(TEXT("ok"), true);
+	return Data;
+}
+
+static void UAL_OpenEditorForAsset(UObject* Asset)
+{
+	if (!Asset || !GEditor)
+	{
+		return;
+	}
+
+	if (UAssetEditorSubsystem* AssetEditorSubsystem = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>())
+	{
+		TArray<UObject*> AssetsToOpen;
+		AssetsToOpen.Add(Asset);
+		AssetEditorSubsystem->OpenEditorForAssets(AssetsToOpen);
+	}
+}
 
 /**
  * 定时器回调：检查截图文件是否生成
@@ -220,6 +296,26 @@ void FUAL_EditorCommands::RegisterCommands(TMap<FString, TFunction<void(const TS
 	CommandMap.Add(TEXT("editor.get_focus_context"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
 	{
 		Handle_GetFocusContext(Payload, RequestId);
+	});
+
+	CommandMap.Add(TEXT("editor.open_asset"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_OpenAsset(Payload, RequestId);
+	});
+
+	CommandMap.Add(TEXT("editor.open_blueprint"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_OpenBlueprint(Payload, RequestId);
+	});
+
+	CommandMap.Add(TEXT("editor.open_level"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_OpenLevel(Payload, RequestId);
+	});
+
+	CommandMap.Add(TEXT("editor.reveal_path"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_RevealPath(Payload, RequestId);
 	});
 }
 
@@ -1177,6 +1273,137 @@ void FUAL_EditorCommands::Handle_GetFocusContext(const TSharedPtr<FJsonObject>& 
     UAL_CommandUtils::SendResponse(RequestId, 200, Result);
 #else
     UAL_CommandUtils::SendError(RequestId, 501, TEXT("editor.get_focus_context is only available in editor mode"));
+#endif
+}
+
+void FUAL_EditorCommands::Handle_OpenAsset(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+#if WITH_EDITOR
+	FString AssetPath;
+	if (!Payload->TryGetStringField(TEXT("assetPath"), AssetPath) || AssetPath.IsEmpty())
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing field: assetPath"));
+		return;
+	}
+
+	UObject* Asset = UAL_LoadAssetForEditor(AssetPath);
+	if (!Asset)
+	{
+		UAL_CommandUtils::SendError(RequestId, 404, FString::Printf(TEXT("Asset not found: %s"), *AssetPath));
+		return;
+	}
+
+	UAL_SyncBrowserToAsset(AssetPath);
+	UAL_OpenEditorForAsset(Asset);
+
+	UAL_CommandUtils::SendResponse(RequestId, 200, UAL_BuildEditorActionData(AssetPath));
+#else
+	UAL_CommandUtils::SendError(RequestId, 501, TEXT("editor.open_asset is only available in editor mode"));
+#endif
+}
+
+void FUAL_EditorCommands::Handle_OpenBlueprint(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+#if WITH_EDITOR
+	FString BlueprintPath;
+	if (!Payload->TryGetStringField(TEXT("blueprintPath"), BlueprintPath) || BlueprintPath.IsEmpty())
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing field: blueprintPath"));
+		return;
+	}
+
+	UObject* Asset = UAL_LoadAssetForEditor(BlueprintPath);
+	if (!Asset)
+	{
+		UAL_CommandUtils::SendError(RequestId, 404, FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		return;
+	}
+
+	if (!Asset->IsA(UBlueprint::StaticClass()))
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, FString::Printf(TEXT("Asset is not a Blueprint: %s"), *BlueprintPath));
+		return;
+	}
+
+	UAL_SyncBrowserToAsset(BlueprintPath);
+	UAL_OpenEditorForAsset(Asset);
+
+	UAL_CommandUtils::SendResponse(RequestId, 200, UAL_BuildEditorActionData(BlueprintPath));
+#else
+	UAL_CommandUtils::SendError(RequestId, 501, TEXT("editor.open_blueprint is only available in editor mode"));
+#endif
+}
+
+void FUAL_EditorCommands::Handle_OpenLevel(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+#if WITH_EDITOR
+	FString LevelPath;
+	if (!Payload->TryGetStringField(TEXT("levelPath"), LevelPath))
+	{
+		Payload->TryGetStringField(TEXT("level_path"), LevelPath);
+	}
+	if (LevelPath.IsEmpty())
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing field: levelPath"));
+		return;
+	}
+
+	const bool bLoaded = UEditorLoadingAndSavingUtils::LoadMap(LevelPath) != nullptr;
+	if (!bLoaded)
+	{
+		UAL_CommandUtils::SendError(RequestId, 500, FString::Printf(TEXT("Failed to load level: %s"), *LevelPath));
+		return;
+	}
+
+	UAL_CommandUtils::SendResponse(RequestId, 200, UAL_BuildEditorActionData(LevelPath));
+#else
+	UAL_CommandUtils::SendError(RequestId, 501, TEXT("editor.open_level is only available in editor mode"));
+#endif
+}
+
+void FUAL_EditorCommands::Handle_RevealPath(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+#if WITH_EDITOR
+	FString TargetPath;
+	if (!Payload->TryGetStringField(TEXT("targetPath"), TargetPath) || TargetPath.IsEmpty())
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing field: targetPath"));
+		return;
+	}
+
+	if (UAL_IsAssetPath(TargetPath))
+	{
+		if (TargetPath.Contains(TEXT(".")))
+		{
+			UAL_SyncBrowserToAsset(TargetPath);
+		}
+		else
+		{
+			UAL_SyncBrowserToFolder(TargetPath);
+		}
+
+		UAL_CommandUtils::SendResponse(RequestId, 200, UAL_BuildEditorActionData(TargetPath));
+		return;
+	}
+
+	TargetPath = FPaths::ConvertRelativePathToFull(TargetPath);
+	if (FPaths::FileExists(TargetPath))
+	{
+		FPlatformProcess::ExploreFolder(*FPaths::GetPath(TargetPath));
+		UAL_CommandUtils::SendResponse(RequestId, 200, UAL_BuildEditorActionData(TargetPath));
+		return;
+	}
+
+	if (FPaths::DirectoryExists(TargetPath))
+	{
+		FPlatformProcess::ExploreFolder(*TargetPath);
+		UAL_CommandUtils::SendResponse(RequestId, 200, UAL_BuildEditorActionData(TargetPath));
+		return;
+	}
+
+	UAL_CommandUtils::SendError(RequestId, 404, FString::Printf(TEXT("Path not found: %s"), *TargetPath));
+#else
+	UAL_CommandUtils::SendError(RequestId, 501, TEXT("editor.reveal_path is only available in editor mode"));
 #endif
 }
 

@@ -117,6 +117,10 @@ void FUAL_BlueprintCommands::RegisterCommands(TMap<FString, TFunction<void(const
 	{
 		Handle_DeleteNode(Payload, RequestId);
 	});
+	CommandMap.Add(TEXT("blueprint.move_node"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+	{
+		Handle_MoveNode(Payload, RequestId);
+	});
 
 	// blueprint.create_graph - 声明式蓝图图表创建（原子操作）
 	CommandMap.Add(TEXT("blueprint.create_graph"), [](const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
@@ -3663,6 +3667,156 @@ void FUAL_BlueprintCommands::Handle_CompileBlueprint(const TSharedPtr<FJsonObjec
 	Result->SetBoolField(TEXT("saved"), bSaved);
 	Result->SetStringField(TEXT("path"), Blueprint->GetPathName());
 	Result->SetArrayField(TEXT("diagnostics"), Diagnostics);
+
+	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
+}
+
+void FUAL_BlueprintCommands::Handle_MoveNode(const TSharedPtr<FJsonObject>& Payload, const FString RequestId)
+{
+	FString BlueprintPath;
+	if (!Payload->TryGetStringField(TEXT("blueprint_path"), BlueprintPath) || BlueprintPath.IsEmpty())
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing field: blueprint_path"));
+		return;
+	}
+
+	FString GraphName;
+	Payload->TryGetStringField(TEXT("graph_name"), GraphName);
+
+	TArray<TSharedPtr<FJsonValue>> MoveEntries;
+	const TArray<TSharedPtr<FJsonValue>>* MoveArray = nullptr;
+	if (Payload->TryGetArrayField(TEXT("nodes"), MoveArray) && MoveArray)
+	{
+		MoveEntries = *MoveArray;
+	}
+	else
+	{
+		FString NodeId;
+		const TSharedPtr<FJsonObject>* PosObjPtr = nullptr;
+		if (!Payload->TryGetStringField(TEXT("node_id"), NodeId) || NodeId.IsEmpty())
+		{
+			UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing field: node_id or nodes"));
+			return;
+		}
+		if (!Payload->TryGetObjectField(TEXT("node_position"), PosObjPtr) || !PosObjPtr || !(*PosObjPtr).IsValid())
+		{
+			UAL_CommandUtils::SendError(RequestId, 400, TEXT("Missing field: node_position"));
+			return;
+		}
+
+		TSharedPtr<FJsonObject> SingleMove = MakeShared<FJsonObject>();
+		SingleMove->SetStringField(TEXT("node_id"), NodeId);
+		SingleMove->SetObjectField(TEXT("node_position"), *PosObjPtr);
+		MoveEntries.Add(MakeShared<FJsonValueObject>(SingleMove));
+	}
+
+	if (MoveEntries.Num() == 0)
+	{
+		UAL_CommandUtils::SendError(RequestId, 400, TEXT("nodes array cannot be empty"));
+		return;
+	}
+
+	UBlueprint* Blueprint = nullptr;
+	FString ResolvedPath;
+	if (!UAL_LoadBlueprintByPathOrName(BlueprintPath, Blueprint, ResolvedPath) || !Blueprint)
+	{
+		UAL_CommandUtils::SendError(RequestId, 404, FString::Printf(TEXT("Blueprint not found: %s"), *BlueprintPath));
+		return;
+	}
+
+	UEdGraph* Graph = UAL_FindGraph(Blueprint, GraphName);
+	if (!Graph)
+	{
+		UAL_CommandUtils::SendError(
+			RequestId,
+			404,
+			FString::Printf(TEXT("Graph not found: %s"), GraphName.IsEmpty() ? TEXT("EventGraph") : *GraphName));
+		return;
+	}
+
+	Blueprint->Modify();
+	Graph->Modify();
+
+	int32 MovedCount = 0;
+	TArray<TSharedPtr<FJsonValue>> MovedNodes;
+	TArray<TSharedPtr<FJsonValue>> Errors;
+
+	for (int32 Index = 0; Index < MoveEntries.Num(); ++Index)
+	{
+		const TSharedPtr<FJsonObject>* MoveObjPtr = nullptr;
+		if (!MoveEntries[Index].IsValid() || !MoveEntries[Index]->TryGetObject(MoveObjPtr) || !MoveObjPtr || !(*MoveObjPtr).IsValid())
+		{
+			TSharedPtr<FJsonObject> ErrorObj = MakeShared<FJsonObject>();
+			ErrorObj->SetNumberField(TEXT("index"), Index);
+			ErrorObj->SetStringField(TEXT("error"), TEXT("invalid move entry"));
+			Errors.Add(MakeShared<FJsonValueObject>(ErrorObj));
+			continue;
+		}
+
+		const TSharedPtr<FJsonObject>& MoveObj = *MoveObjPtr;
+		FString NodeId;
+		if (!MoveObj->TryGetStringField(TEXT("node_id"), NodeId) || NodeId.IsEmpty())
+		{
+			TSharedPtr<FJsonObject> ErrorObj = MakeShared<FJsonObject>();
+			ErrorObj->SetNumberField(TEXT("index"), Index);
+			ErrorObj->SetStringField(TEXT("error"), TEXT("missing node_id"));
+			Errors.Add(MakeShared<FJsonValueObject>(ErrorObj));
+			continue;
+		}
+
+		const TSharedPtr<FJsonObject>* PosObjPtr = nullptr;
+		if (!MoveObj->TryGetObjectField(TEXT("node_position"), PosObjPtr) || !PosObjPtr || !(*PosObjPtr).IsValid())
+		{
+			TSharedPtr<FJsonObject> ErrorObj = MakeShared<FJsonObject>();
+			ErrorObj->SetNumberField(TEXT("index"), Index);
+			ErrorObj->SetStringField(TEXT("node_id"), NodeId);
+			ErrorObj->SetStringField(TEXT("error"), TEXT("missing node_position"));
+			Errors.Add(MakeShared<FJsonValueObject>(ErrorObj));
+			continue;
+		}
+
+		double PosXValue = 0.0;
+		double PosYValue = 0.0;
+		(*PosObjPtr)->TryGetNumberField(TEXT("x"), PosXValue);
+		(*PosObjPtr)->TryGetNumberField(TEXT("y"), PosYValue);
+		const int32 PosX = FMath::RoundToInt(PosXValue);
+		const int32 PosY = FMath::RoundToInt(PosYValue);
+
+		UEdGraphNode* Node = UAL_FindNodeByGuid(Graph, NodeId);
+		if (!Node)
+		{
+			TSharedPtr<FJsonObject> ErrorObj = MakeShared<FJsonObject>();
+			ErrorObj->SetNumberField(TEXT("index"), Index);
+			ErrorObj->SetStringField(TEXT("node_id"), NodeId);
+			ErrorObj->SetStringField(TEXT("error"), TEXT("node not found"));
+			Errors.Add(MakeShared<FJsonValueObject>(ErrorObj));
+			continue;
+		}
+
+		Node->Modify();
+		Node->NodePosX = PosX;
+		Node->NodePosY = PosY;
+
+		TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
+		NodeObj->SetStringField(TEXT("node_id"), NodeId);
+		NodeObj->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::ListView).ToString());
+		NodeObj->SetNumberField(TEXT("pos_x"), PosX);
+		NodeObj->SetNumberField(TEXT("pos_y"), PosY);
+		MovedNodes.Add(MakeShared<FJsonValueObject>(NodeObj));
+		MovedCount++;
+	}
+
+	Graph->NotifyGraphChanged();
+	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("ok"), MovedCount > 0 && Errors.Num() == 0);
+	Result->SetStringField(TEXT("blueprint_path"), ResolvedPath);
+	Result->SetStringField(TEXT("graph_name"), Graph->GetName());
+	Result->SetNumberField(TEXT("moved_count"), MovedCount);
+	Result->SetArrayField(TEXT("moved_nodes"), MovedNodes);
+	Result->SetArrayField(TEXT("errors"), Errors);
+	Result->SetStringField(TEXT("message"), FString::Printf(TEXT("Moved %d node(s)"), MovedCount));
 
 	UAL_CommandUtils::SendResponse(RequestId, 200, Result);
 }

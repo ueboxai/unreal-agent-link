@@ -64,6 +64,9 @@ public:
 	// blueprint.delete_node - 删除图表中的节点
 	static void Handle_DeleteNode(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
 
+	// blueprint.move_node - 绉诲姩涓€涓垨鎵归噺鑺傜偣鍒版寚瀹氬潗鏍?
+	static void Handle_MoveNode(const TSharedPtr<FJsonObject>& Payload, const FString RequestId);
+
 	/**
 	 * blueprint.create_graph - 声明式蓝图图表创建（原子操作）
 	 * 

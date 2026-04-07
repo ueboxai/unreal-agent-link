@@ -75,6 +75,7 @@ public class UnrealAgentLink : ModuleRules
 				"Engine",
 				"PhysicsCore",
 				"PythonScriptPlugin",
+				"EditorScriptingUtilities",
 				"ContentBrowser",
 				"Slate",
 				"SlateCore",
