@@ -1,4 +1,5 @@
 ﻿#include "UAL_ContentBrowserCommands.h"
+#include "UAL_VersionCompat.h"
 #include "UAL_CommandUtils.h"
 #include "Utils/UAL_PBRMaterialHelper.h"
 #include "Utils/UAL_NormalizedImporter.h"
@@ -1407,7 +1408,7 @@ void FUAL_ContentBrowserCommands::Handle_DescribeAsset(
 	
 	// 获取完整路径
 #if ENGINE_MAJOR_VERSION > 5 || (ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1)
-	Response->SetStringField(TEXT("path"), AssetData.GetObjectPathString());
+	Response->SetStringField(TEXT("path"), UALCompat::GetObjectPathString(AssetData));
 	Response->SetStringField(TEXT("class"), AssetData.AssetClassPath.GetAssetName().ToString());
 #else
 	Response->SetStringField(TEXT("path"), AssetData.ObjectPath.ToString());
@@ -1562,7 +1563,7 @@ void FUAL_ContentBrowserCommands::Handle_DescribeAsset(
 				Details->SetNumberField(TEXT("triangles_lod0"), Mesh->GetNumTriangles(0));
 				Details->SetNumberField(TEXT("vertices_lod0"), Mesh->GetNumVertices(0));
 			}
-			Details->SetBoolField(TEXT("nanite_enabled"), Mesh->IsNaniteEnabled());
+			Details->SetBoolField(TEXT("nanite_enabled"), UALCompat::IsNaniteEnabled(Mesh));
 			bHasDetails = true;
 		}
 
@@ -1932,7 +1933,7 @@ void FUAL_ContentBrowserCommands::Handle_AuditOptimization(const TSharedPtr<FJso
 					LargeTextures4K++;
 
 					TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
-					Entry->SetStringField(TEXT("path"), AssetData.GetObjectPathString());
+					Entry->SetStringField(TEXT("path"), UALCompat::GetObjectPathString(AssetData));
 					Entry->SetStringField(TEXT("name"), AssetData.AssetName.ToString());
 					Entry->SetNumberField(TEXT("width"), Width);
 					Entry->SetNumberField(TEXT("height"), Height);

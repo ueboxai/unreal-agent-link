@@ -1,4 +1,5 @@
 #include "UAL_MaterialCommands.h"
+#include "UAL_VersionCompat.h"
 #include "UAL_CommandUtils.h"
 #include "Utils/UAL_PBRMaterialHelper.h"
 
@@ -708,7 +709,7 @@ void FUAL_MaterialCommands::Handle_GetMaterialGraph(
 		// 猜错拿一个 400，再换一个名字接着猜。Sine 的输入叫 Input、
 		// Lerp 的叫 A/B/Alpha，没有通用规律，只能从图里读。
 		TArray<TSharedPtr<FJsonValue>> InputsJson;
-		const int32 NodeInputCount = Expression->CountInputs();
+		const int32 NodeInputCount = UALCompat::CountInputs(Expression);
 		for (int32 i = 0; i < NodeInputCount; ++i)
 		{
 			FExpressionInput* Input = Expression->GetInput(i);
@@ -781,7 +782,7 @@ void FUAL_MaterialCommands::Handle_GetMaterialGraph(
 #endif
 	{
 		if (!Expression) continue;
-		const int32 InputCount = Expression->CountInputs();
+		const int32 InputCount = UALCompat::CountInputs(Expression);
 		for (int32 i = 0; i < InputCount; ++i)
 		{
 			FExpressionInput* Input = Expression->GetInput(i);
@@ -1367,7 +1368,7 @@ void FUAL_MaterialCommands::Handle_ConnectMaterialPins(
 		FExpressionInput* TargetInput = nullptr;
 		FString MatchedInputName;
 		TArray<FString> AvailableInputs;
-		const int32 InputCount = TargetExpression->CountInputs();
+		const int32 InputCount = UALCompat::CountInputs(TargetExpression);
 		for (int32 i = 0; i < InputCount; ++i)
 		{
 			const FString InputName = TargetExpression->GetInputName(i).ToString();
