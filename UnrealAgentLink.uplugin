@@ -1,0 +1,31 @@
+﻿{
+    "FileVersion":  3,
+    "Version":  10207,
+    "VersionName":  "1.2.7",
+    "FriendlyName":  "UnrealAgentLink",
+    "Description":  "Unreal Agent Link For UEBOX",
+    "Category":  "Other",
+    "CreatedBy":  "uebox.ai",
+    "CreatedByURL":  "",
+    "DocsURL":  "",
+    "MarketplaceURL":  "",
+    "SupportURL":  "",
+    "CanContainContent":  true,
+    "IsBetaVersion":  false,
+    "IsExperimentalVersion":  false,
+    "Installed":  true,
+    "EnabledByDefault":  true,
+    "Modules":  [
+                    {
+                        "Name":  "UnrealAgentLink",
+                        "Type":  "Editor",
+                        "LoadingPhase":  "Default"
+                    }
+                ],
+    "Plugins":  [
+                    {
+                        "Name":  "PythonScriptPlugin",
+                        "Enabled":  true
+                    }
+                ]
+}
