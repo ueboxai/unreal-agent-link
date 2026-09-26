@@ -1,3 +1,13 @@
+> [!IMPORTANT]
+> **This repository is archived and no longer updated.**
+> UnrealAgentLink only works together with [Unreal Box](https://uebox.ai) and now ships inside it:
+> install Unreal Box and it installs and updates the plugin for UE 5.0–5.8 automatically.
+> The latest source lives at <https://github.com/ueboxai/uebox/tree/main/plugin/UnrealAgentLink>.
+>
+> **本仓库已归档，不再更新。** 插件只能配合[虚幻盒子](https://uebox.ai)使用，现已随盒子一起分发：
+> 安装虚幻盒子即可自动安装、升级 UE 5.0–5.8 的插件。最新源码见
+> <https://github.com/ueboxai/uebox/tree/main/plugin/UnrealAgentLink>。
+
 # UnrealAgentLink
 
 <p align="center">
